@@ -58,13 +58,15 @@ internal sealed class ClipboardMonitor : IDisposable
         if (message != WM_CLIPBOARDUPDATE)
             return;
 
-        // Cheap pre-check; TryReadAsync repeats every marker check once the clipboard is open.
+        // Cheap pre-check; TryRead repeats every marker check once the clipboard is open.
         if (Paused || ClipboardAccess.IsMarkedPrivate())
             return;
 
         var sequence = GetClipboardSequenceNumber();
         // WinClip's own writes (pasting from history) are not new copies; the store moves those up itself.
-        if (ClipboardAccess.IsOwnWrite(sequence))
+        // The owner check backs up the sequence check: re-capturing a plain-text paste would strip the
+        // item's stored formatting.
+        if (ClipboardAccess.IsOwnWrite(sequence) || GetClipboardOwner() == _window.Handle)
             return;
 
         bool start;
@@ -79,11 +81,11 @@ internal sealed class ClipboardMonitor : IDisposable
         }
 
         if (start)
-            _ = Task.Run(CapturePendingAsync);
+            _ = Task.Run(CapturePending);
     }
 
     /// <summary>Drains pending updates one at a time until none is left, then goes idle.</summary>
-    private async Task CapturePendingAsync()
+    private void CapturePending()
     {
         while (true)
         {
@@ -100,7 +102,7 @@ internal sealed class ClipboardMonitor : IDisposable
 
             try
             {
-                await CaptureAsync();
+                Capture();
             }
             catch (Exception ex)
             {
@@ -120,10 +122,10 @@ internal sealed class ClipboardMonitor : IDisposable
         }
     }
 
-    private async Task CaptureAsync()
+    private void Capture()
     {
         var ownerProcessId = ClipboardAccess.GetOwnerProcessId();
-        if (await ClipboardAccess.TryReadAsync(_window.Handle, Limits) is not { } raw)
+        if (ClipboardAccess.TryRead(Limits) is not { } raw)
             return;
         if (ToContent(raw) is not { } content)
             return;

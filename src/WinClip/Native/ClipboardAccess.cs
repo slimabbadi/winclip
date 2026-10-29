@@ -50,9 +50,13 @@ internal static class ClipboardAccess
         sequence != 0 && sequence == (uint)Interlocked.Read(ref _ownWriteSequence);
 
     /// <summary>Reads the clipboard, or null when it can't be opened or the contents opted out of history.</summary>
-    public static async Task<RawClipboard?> TryReadAsync(IntPtr owner, ClipboardLimits limits)
+    /// <remarks>
+    /// Synchronous on purpose: Windows ties an open clipboard to the thread that opened it, so opening, reading
+    /// and closing must not be split across an await. Call it off the UI thread, since opening may retry.
+    /// </remarks>
+    public static RawClipboard? TryRead(ClipboardLimits limits)
     {
-        if (!await TryOpenAsync(owner))
+        if (!TryOpen())
             return null;
         try
         {
@@ -145,6 +149,21 @@ internal static class ClipboardAccess
             return null;
         GetWindowThreadProcessId(owner, out var processId);
         return processId == 0 ? null : (int)processId;
+    }
+
+    /// <summary>
+    /// Opens the clipboard for reading on the calling thread. No owner window is passed: that is only needed to
+    /// write, and the message window belongs to the UI thread.
+    /// </summary>
+    private static bool TryOpen()
+    {
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            if (OpenClipboard(IntPtr.Zero))
+                return true;
+            Thread.Sleep(15 * (attempt + 1));
+        }
+        return false;
     }
 
     private static async Task<bool> TryOpenAsync(IntPtr owner)

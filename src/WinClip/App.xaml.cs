@@ -43,6 +43,7 @@ public partial class App : Application
     private Task _storeWrites = Task.CompletedTask;
     private bool _startupCompleted;
     private bool _startupFailureShown;
+    private bool _unreadableNotified;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -119,7 +120,11 @@ public partial class App : Application
         _popup.ItemChosen += OnItemChosen;
         _tray = new TrayIcon(
             showHistory: () => TogglePopup(IntPtr.Zero),
-            setPaused: paused => _monitor!.Paused = paused,
+            setPaused: paused =>
+            {
+                _monitor!.Paused = paused;
+                _popup!.RecordingPaused = paused;
+            },
             openSettings: OpenSettings,
             clearHistory: ClearHistory,
             quit: Shutdown);
@@ -301,6 +306,7 @@ public partial class App : Application
         try
         {
             popup.ShowFor(target);
+            NotifyUnreadableOnce();
         }
         catch (Exception ex)
         {
@@ -379,6 +385,20 @@ public partial class App : Application
             MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel);
         if (answer == MessageBoxResult.OK)
             _store!.ClearUnpinned();
+    }
+
+    /// <summary>
+    /// Tells the user once per session when history entries couldn't be decrypted, for example after a Windows
+    /// password reset by an administrator, which makes DPAPI keys unusable. The entries are kept, not deleted.
+    /// </summary>
+    private void NotifyUnreadableOnce()
+    {
+        if (_unreadableNotified || _store is not { UnreadableItemCount: > 0 and var count })
+            return;
+        _unreadableNotified = true;
+        _tray?.Notify("Some history can't be read",
+            $"{count} {(count == 1 ? "item" : "items")} couldn't be decrypted with your Windows account and are hidden.",
+            warning: true);
     }
 
     private static ClipboardLimits ClipboardLimitsFor(AppSettings settings) =>
