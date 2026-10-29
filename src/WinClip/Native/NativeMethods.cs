@@ -58,6 +58,10 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr GetClipboardOwner();
 
+    /// <summary>Increments on every clipboard change; returns 0 when the sequence cannot be read.</summary>
+    [DllImport("user32.dll")]
+    public static extern uint GetClipboardSequenceNumber();
+
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
 
