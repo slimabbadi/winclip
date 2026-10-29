@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WinClip.Core/WinClip.Core.csproj" />
+    <Project Path="src/WinClip/WinClip.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WinClip.Tests/WinClip.Tests.csproj" />
+  </Folder>
+</Solution>
