@@ -35,13 +35,14 @@
                  Background="Transparent" BorderThickness="0"
                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                  ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                 PreviewMouseLeftButtonDown="OnClipPressed"
                  PreviewMouseLeftButtonUp="OnClipClicked"
                  AutomationProperties.Name="Clipboard history">
             <ListBox.ItemContainerStyle>
                 <Style TargetType="ListBoxItem">
                     <Setter Property="Focusable" Value="False" />
                     <Setter Property="Foreground" Value="{StaticResource Text}" />
-                    <Setter Property="AutomationProperties.Name" Value="{Binding Preview}" />
+                    <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
                     <Setter Property="Template">
                         <Setter.Value>
                             <ControlTemplate TargetType="ListBoxItem">
@@ -78,7 +79,7 @@
                             <Border x:Name="ThumbFrame" Visibility="{Binding ThumbnailVisibility}" HorizontalAlignment="Left"
                                     CornerRadius="4" ClipToBounds="True" Margin="0,1,0,6"
                                     BorderBrush="{StaticResource Hairline}" BorderThickness="1">
-                                <Image x:Name="Thumb" Source="{Binding Thumbnail}" MaxHeight="36" Stretch="Uniform" StretchDirection="DownOnly"
+                                <Image x:Name="Thumb" Source="{Binding Thumbnail}" MaxHeight="36" MaxWidth="340" Stretch="Uniform" StretchDirection="DownOnly"
                                        RenderOptions.BitmapScalingMode="HighQuality" />
                             </Border>
                             <DockPanel x:Name="Line">
@@ -117,7 +118,7 @@
                    TextWrapping="Wrap" MaxWidth="300" Visibility="Collapsed" />
 
         <Border Grid.Row="3" BorderBrush="{StaticResource Hairline}" BorderThickness="0,1,0,0">
-            <TextBlock x:Name="Hints" FontSize="12" Foreground="{StaticResource Muted}" Margin="16,10" />
+            <TextBlock x:Name="Hints" FontSize="12" Foreground="{StaticResource Muted}" Margin="16,10" TextWrapping="Wrap" />
         </Border>
     </Grid>
 </Window>

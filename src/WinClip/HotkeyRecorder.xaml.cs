@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -66,8 +67,14 @@ internal sealed partial class HotkeyRecorder : UserControl
             return;
         }
 
-        e.Handled = true;
         var modifiers = (HotkeyModifiers)Keyboard.Modifiers;
+        if (key == Key.Tab && modifiers is HotkeyModifiers.None or HotkeyModifiers.Shift)
+        {
+            StopRecording(); // Not handled, so focus still moves on.
+            return;
+        }
+
+        e.Handled = true;
         if (key == Key.Escape && modifiers == HotkeyModifiers.None)
         {
             StopRecording();
@@ -92,8 +99,10 @@ internal sealed partial class HotkeyRecorder : UserControl
     {
         if (_recording)
             return;
-        Focus();
+        if (!IsKeyboardFocused && !Focus())
+            return;
         _recording = true;
+        AutomationProperties.SetHelpText(this, "Recording. Press the new shortcut, or Esc to cancel.");
         RecordingChanged?.Invoke(true);
         Hint.Text = "Esc to cancel";
         ShowHeldModifiers();
@@ -104,6 +113,7 @@ internal sealed partial class HotkeyRecorder : UserControl
         if (!_recording)
             return;
         _recording = false;
+        AutomationProperties.SetHelpText(this, "");
         RecordingChanged?.Invoke(false);
         Render();
     }
@@ -114,6 +124,7 @@ internal sealed partial class HotkeyRecorder : UserControl
         Keys.Visibility = Visibility.Visible;
         Prompt.Visibility = Visibility.Collapsed;
         Hint.Text = "Change";
+        AutomationProperties.SetName(this, $"Shortcut {Describe(_gesture)}. Press Enter to change.");
         Frame.BorderBrush = Brush(IsKeyboardFocused ? "Accent" : "Hairline");
     }
 
