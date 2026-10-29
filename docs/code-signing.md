@@ -4,7 +4,7 @@ WinClip releases are currently unsigned. No signing provider is configured. The 
 
 ## Provider choice
 
-The selected route is to apply to SignPath Foundation first. The application was filled and submission was attempted on 29 October 2026 with the maintainer's approval. The form has not displayed a receipt or success confirmation; receipt is unverified and Foundation approval is pending. Check the notification email before resubmitting to avoid duplicate applications.
+The selected route is SignPath Foundation. The application was submitted on 29 October 2026 with the maintainer's approval. After refreshing a stalled form and restoring the approved details, the site confirmed: “Form submitted” and “Thank you, we'll be in touch soon.” Optional marketing was disabled. Foundation approval is pending; submission confirmation is not signing approval.
 
 The maintainer publishes as an individual in Germany. Microsoft's [Artifact Signing prerequisites](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart) currently limit public-trust individual enrollment to the US and Canada, so that service is not available for this identity.
 
