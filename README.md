@@ -1,5 +1,7 @@
 # WinClip
 
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black&style=flat)](https://buymeacoffee.com/slimabbadi)
+
 A keyboard-first clipboard history for Windows, inspired by [Maccy](https://github.com/p0deje/Maccy) on macOS.
 
 Press **Ctrl+Alt+V** anywhere, type a few letters, and press **Enter** to paste into the app you were using.
@@ -96,7 +98,9 @@ dotnet run --project src/WinClip
 
 ## Support
 
-WinClip is free. If it saves you time, you can [buy me a coffee](https://buymeacoffee.com/slimabbadi).
+WinClip is free. If it saves you time, you can buy me a coffee. You'll also find this link in the tray menu and in Settings.
+
+<a href="https://buymeacoffee.com/slimabbadi"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="48"></a>
 
 ## License
 

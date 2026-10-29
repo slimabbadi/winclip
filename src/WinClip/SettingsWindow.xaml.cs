@@ -54,6 +54,8 @@ internal sealed partial class SettingsWindow : Window
         Close();
     }
 
+    private void OnSupport(object sender, RoutedEventArgs e) => SupportLink.Open();
+
     private void ShowError(string message)
     {
         ErrorText.Text = message;
