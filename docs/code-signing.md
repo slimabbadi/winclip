@@ -19,7 +19,7 @@ If acceptance or the Foundation publisher identity is unsuitable, use a paid pub
 - Build system: GitHub-hosted Windows Actions runners, with build and test steps and versioned source tags.
 - Requested artifacts: WinClip's own executable and managed assemblies, the Velopack installer, portable zip, and update package. Third-party binaries retain their upstream signatures; they must not be signed as WinClip's own code.
 - Proposed author, reviewer, and signing approver: slimabbadi. Confirm that the single-maintainer role arrangement meets Foundation requirements.
-- Privacy: clipboard content is encrypted locally using Windows DPAPI and is not uploaded by WinClip. Optional automatic update checks and manual update requests contact GitHub and its download hosts. Support links open the user's browser.
+- Privacy: see [the privacy policy](../PRIVACY.md). Clipboard content is encrypted locally using Windows DPAPI and is not uploaded by WinClip. Optional automatic update checks and manual update requests contact GitHub and its download hosts. Support links open the user's browser.
 - Requested workflow: sign WinClip binaries before packaging, sign the installer, verify signatures and package consistency, regenerate checksums, then publish the release.
 
 This is an application draft, not a claim that signing is provided. Add the Foundation's required attribution only after approval.

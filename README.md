@@ -85,6 +85,8 @@ Settings are saved to `%LOCALAPPDATA%\WinClip\settings.json`.
 
 ## Privacy
 
+See the [privacy policy](PRIVACY.md) for storage, network activity, retention, and deletion details.
+
 - Copies marked private are never recorded. Most password managers mark them with `ExcludeClipboardContentFromMonitorProcessing`, `Clipboard Viewer Ignore`, or `CanIncludeInClipboardHistory = 0`.
 - **Pause recording** in the tray menu stops recording until you turn it off or restart WinClip.
 - History lives in `%LOCALAPPDATA%\WinClip\history.db`. Text, images and formatting are encrypted with Windows DPAPI, so only your Windows account can read them. Duplicate detection uses a keyed hash, so the file doesn't reveal whether it contains a guessed value. Deleted items are overwritten, not just unlinked.
