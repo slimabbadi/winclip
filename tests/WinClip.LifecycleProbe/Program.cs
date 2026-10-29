@@ -10,10 +10,15 @@ internal static class Program
     private static readonly string DataDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinClip");
 
-    private static async Task<int> Main(string[] args)
+    [STAThread]
+    private static int Main(string[] args) => RunAsync(args).GetAwaiter().GetResult();
+
+    private static async Task<int> RunAsync(string[] args)
     {
         try
         {
+            if (args.Length == 1 && args[0] == "settings-smoke")
+                return SmokeSettings();
             if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
                 throw new InvalidOperationException("Lifecycle probe runs only on a fresh GitHub-hosted runner.");
             switch (args[0])
@@ -53,6 +58,31 @@ internal static class Program
         store.SetPinned(pinned.Id, true);
         store.Add(ClipContent.PlainText("lifecycle regular"), "probe", DateTimeOffset.Now);
         Console.WriteLine("PASS: seeded encrypted history, pinned item and settings");
+    }
+
+    private static int SmokeSettings()
+    {
+        // Initialize resources without starting App: no capture, mutex, logging or user-data writes.
+        var application = new App();
+        application.InitializeComponent();
+        var settings = new SettingsWindow(new AppSettings(), _ => null, _ => { });
+        try
+        {
+            var requested = false;
+            settings.DeleteDataRequested += () => requested = true;
+            settings.Show();
+            settings.UpdateLayout();
+            var button = (System.Windows.Controls.Button)settings.FindName("DeleteData");
+            button.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            if (!requested || !button.IsVisible || settings.ActualHeight > System.Windows.SystemParameters.WorkArea.Height)
+                throw new InvalidOperationException("Settings deletion control or layout is unavailable.");
+            Console.WriteLine("PASS: real Settings window renders and deletion button dispatches its action");
+            return 0;
+        }
+        finally
+        {
+            settings.Close();
+        }
     }
 
     private static void Verify()

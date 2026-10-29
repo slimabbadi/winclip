@@ -25,6 +25,11 @@ jobs:
           dotnet test tests/WinClip.Tests -c Release
           $code = $LASTEXITCODE
           exit $code
+      - name: Render Settings without touching user data
+        run: |
+          ./tests/WinClip.LifecycleProbe/bin/Release/net10.0-windows/WinClip.LifecycleProbe.exe settings-smoke
+          $code = $LASTEXITCODE
+          exit $code
       - name: Package candidate
         run: ./scripts/release.ps1 -Version 0.2.1-lifecycle
       - name: Install, update, delete data and uninstall
@@ -33,8 +38,9 @@ jobs:
         if: always()
         run: |
           New-Item -ItemType Directory -Force artifacts/lifecycle/logs | Out-Null
-          foreach ($file in "$env:LOCALAPPDATA/WinClip/winclip.log", "$env:LOCALAPPDATA/velopack/velopack.log") {
-            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination artifacts/lifecycle/logs }
+          foreach ($directory in "$env:LOCALAPPDATA/WinClip", "$env:LOCALAPPDATA/velopack", "$env:LOCALAPPDATA/WinClip.App") {
+            Get-ChildItem -LiteralPath $directory -Filter '*.log' -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination artifacts/lifecycle/logs }
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
