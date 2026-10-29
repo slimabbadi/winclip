@@ -142,6 +142,10 @@ To test packaging without publishing, run the workflow manually with a version. 
 
 Run **Verify lifecycle** in GitHub Actions to test the published 0.2.0 installer against a candidate update on a fresh hosted Windows runner. It checks encrypted history and pin retention, bundled-runtime loading, update download/apply/restart, deletion cancellation and confirmation through the real Settings window, and uninstall data retention. The runner has an SDK installed, so bundled-runtime loading is checked directly rather than claiming a machine without .NET. The previous app is stopped before applying the update; a handoff while active history writes are queued still needs separate coverage. The script refuses to run on your workstation or over existing WinClip data.
 
+## Code signing policy
+
+WinClip is applying to SignPath Foundation for free open-source signing. Approval is pending and the current release is unsigned. See the [code signing policy](docs/code-signing.md) for maintainer roles, manual signing approval, and the proposed integration.
+
 ## Support
 
 WinClip is free. If it saves you time, you can buy me a coffee. You'll also find this link in the tray menu and in Settings.

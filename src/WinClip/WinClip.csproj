@@ -16,6 +16,7 @@
     <ApplicationIcon>WinClip.ico</ApplicationIcon>
     <!-- Release builds override this from the git tag (see .github/workflows/release.yml). -->
     <Version>0.0.0-dev</Version>
+    <Product>WinClip</Product>
     <!-- Velopack must run before WPF starts, so the entry point is Program.Main rather than the generated one. -->
     <StartupObject>WinClip.Program</StartupObject>
   </PropertyGroup>
