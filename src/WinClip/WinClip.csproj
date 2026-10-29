@@ -38,6 +38,7 @@
 
   <ItemGroup>
     <PackageReference Include="Velopack" Version="1.2.161" />
+    <InternalsVisibleTo Include="WinClip.LifecycleProbe" />
   </ItemGroup>
 
 </Project>

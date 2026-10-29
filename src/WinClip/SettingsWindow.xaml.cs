@@ -8,6 +8,9 @@ namespace WinClip;
 internal sealed partial class SettingsWindow : Window
 {
     private readonly Func<AppSettings, string?> _apply;
+    public event Action? DeleteDataRequested;
+
+    private void OnDeleteData(object sender, RoutedEventArgs e) => DeleteDataRequested?.Invoke();
 
     /// <param name="apply">Saves and applies settings; returns an error message when they can't be applied.</param>
     /// <param name="pauseHotkey">Releases (true) or re-registers (false) the global shortcut while recording.</param>

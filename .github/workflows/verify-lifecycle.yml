@@ -1,0 +1,42 @@
+name: Verify lifecycle
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build lifecycle probe
+        run: |
+          dotnet build tests/WinClip.LifecycleProbe -c Release
+          $code = $LASTEXITCODE
+          exit $code
+      - name: Test Core
+        run: |
+          dotnet test tests/WinClip.Tests -c Release
+          $code = $LASTEXITCODE
+          exit $code
+      - name: Package candidate
+        run: ./scripts/release.ps1 -Version 0.2.1-lifecycle
+      - name: Install, update, delete data and uninstall
+        run: ./scripts/verify-lifecycle.ps1 -PackageDirectory artifacts/release-0.2.1-lifecycle/packages
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: lifecycle-evidence
+          path: |
+            artifacts/lifecycle/**
+            artifacts/release-0.2.1-lifecycle/packages/*.json
+            artifacts/release-0.2.1-lifecycle/packages/SHA256SUMS.txt
+            ~/AppData/Local/WinClip/winclip.log
+            ~/AppData/Local/velopack/velopack.log
+          if-no-files-found: warn

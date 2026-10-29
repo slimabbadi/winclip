@@ -23,12 +23,19 @@ internal sealed class Updater
     private readonly UpdateManager _manager;
     private VelopackAsset? _ready;
 
-    public Updater()
+    public Updater() : this(CreateManager()) { }
+
+    internal Updater(UpdateManager manager)
+    {
+        _manager = manager;
+        _ready = _manager.UpdatePendingRestart;
+    }
+
+    private static UpdateManager CreateManager()
     {
         var current = new UpdateManager(new GithubSource(RepositoryUrl, null, prerelease: false));
         var isPrerelease = current.CurrentVersion?.ToString().Contains('-') ?? false;
-        _manager = isPrerelease ? new UpdateManager(new GithubSource(RepositoryUrl, null, prerelease: true)) : current;
-        _ready = _manager.UpdatePendingRestart;
+        return isPrerelease ? new UpdateManager(new GithubSource(RepositoryUrl, null, prerelease: true)) : current;
     }
 
     /// <summary>Installed version, or null when running a build that wasn't installed (such as from source).</summary>

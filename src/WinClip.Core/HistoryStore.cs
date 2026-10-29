@@ -223,7 +223,11 @@ public sealed class HistoryStore : IDisposable
     public void Dispose()
     {
         lock (_gate)
+        {
+            // A pooled connection can keep the database open after Dispose, preventing explicit data deletion.
+            SqliteConnection.ClearPool(_connection);
             _connection.Dispose();
+        }
     }
 
     private void EnsureLoaded()

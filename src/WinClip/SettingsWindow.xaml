@@ -4,6 +4,7 @@
         xmlns:local="clr-namespace:WinClip"
         x:ClassModifier="internal"
         Title="WinClip settings" Width="500" SizeToContent="Height" ResizeMode="NoResize"
+        MaxHeight="{Binding Source={x:Static SystemParameters.WorkArea}, Path=Height}"
         WindowStartupLocation="CenterScreen" Background="{StaticResource Surface}"
         FontFamily="{StaticResource UiFont}" Foreground="{StaticResource Text}"
         TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
@@ -21,6 +22,7 @@
         </Style>
     </Window.Resources>
 
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <StackPanel Margin="28,24,28,22">
         <TextBlock Text="Shortcut" Style="{StaticResource Label}" />
         <local:HotkeyRecorder x:Name="Recorder" />
@@ -55,6 +57,12 @@
         <CheckBox x:Name="CheckForUpdates" Content="Check for updates automatically" Style="{StaticResource Toggle}" Margin="0,16,0,0" />
         <TextBlock Style="{StaticResource Help}" Margin="46,4,0,0"
                      Text="Checks GitHub once a day and installs new versions when you restart. Your clipboard history stays on this PC." />
+
+        <Button x:Name="DeleteData" Content="Delete all local data…" Click="OnDeleteData"
+                Style="{StaticResource SecondaryButton}" Foreground="{StaticResource Error}"
+                HorizontalAlignment="Left" Margin="0,24,0,0" />
+        <TextBlock Text="Removes history including pins, settings and logs, then quits WinClip."
+                   Style="{StaticResource Help}" />
 
         <TextBlock x:Name="ErrorText" Foreground="{StaticResource Error}" FontSize="13" TextWrapping="Wrap"
                    Margin="0,20,0,0" Visibility="Collapsed" />
@@ -93,4 +101,5 @@
                     KeyboardNavigation.TabIndex="1" />
         </DockPanel>
     </StackPanel>
+    </ScrollViewer>
 </Window>

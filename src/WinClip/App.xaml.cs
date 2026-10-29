@@ -47,6 +47,8 @@ public partial class App : Application
     private bool _startupCompleted;
     private bool _startupFailureShown;
     private bool _unreadableNotified;
+    private bool _deletingData;
+    private TextWriterTraceListener? _logListener;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -100,7 +102,8 @@ public partial class App : Application
         }
 
         Directory.CreateDirectory(DataDirectory);
-        Trace.Listeners.Add(new TextWriterTraceListener(LogPath));
+        _logListener = new TextWriterTraceListener(LogPath);
+        Trace.Listeners.Add(_logListener);
         Trace.AutoFlush = true;
 
         _openSettingsWait = ThreadPool.RegisterWaitForSingleObject(_openSettingsSignal,
@@ -240,7 +243,7 @@ public partial class App : Application
         try
         {
             var outcome = await _updater.CheckAndDownloadAsync();
-            if (Dispatcher.HasShutdownStarted)
+            if (_deletingData || Dispatcher.HasShutdownStarted)
                 return;
             if (outcome == UpdateCheckResult.Ready)
                 _tray!.ShowUpdateReady(_updater.ReadyVersion!, RestartToUpdate);
@@ -264,6 +267,8 @@ public partial class App : Application
 
     private void RestartToUpdate()
     {
+        if (_deletingData)
+            return;
         try
         {
             if (_updater?.ScheduleRestart() == true)
@@ -311,13 +316,16 @@ public partial class App : Application
 
     private void OpenSettings()
     {
+        if (_deletingData)
+            return;
         if (_settingsWindow is null)
         {
             _settingsWindow = new SettingsWindow(_settings, ApplySettings, PauseHotkey);
+            _settingsWindow.DeleteDataRequested += DeleteLocalData;
             _settingsWindow.Closed += (_, _) =>
             {
                 _settingsWindow = null;
-                if (_hotkey is null)
+                if (_hotkey is null && !_deletingData)
                     EnsureHotkey();
             };
             _settingsWindow.Show();
@@ -346,6 +354,8 @@ public partial class App : Application
         var now = DateTimeOffset.Now;
         lock (_writeGate)
         {
+            if (_deletingData)
+                return;
             _storeWrites = _storeWrites.ContinueWith(
                 _ => AddToStore(store, content, captured.SourceApp, now), TaskScheduler.Default);
         }
@@ -393,6 +403,8 @@ public partial class App : Application
         await _pasteGate.WaitAsync();
         try
         {
+            if (_deletingData)
+                return;
             var store = _store;
             if (store is null)
                 return;
@@ -456,6 +468,57 @@ public partial class App : Application
             MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel);
         if (answer == MessageBoxResult.OK)
             _store!.ClearUnpinned();
+    }
+
+    private async void DeleteLocalData()
+    {
+        if (_deletingData)
+            return;
+        var answer = MessageBox.Show(_settingsWindow!,
+            "Delete all clipboard history, including pinned items, settings and logs?\n\n"
+            + "WinClip will turn off Start with Windows and quit. This cannot be undone. "
+            + "Your current Windows clipboard will not be cleared.",
+            "Delete all local data", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel);
+        if (answer != MessageBoxResult.OK)
+            return;
+
+        Task writes;
+        lock (_writeGate)
+        {
+            _deletingData = true;
+            writes = _storeWrites;
+        }
+        _settingsWindow!.IsEnabled = false;
+        _hotkey?.Dispose();
+        _hotkey = null;
+        _tray?.Dispose();
+        _tray = null;
+        _updateTimer?.Stop();
+        _monitor!.Paused = true;
+        _popup!.Hide();
+        await _pasteGate.WaitAsync();
+        try
+        {
+            await writes;
+            StartupRegistration.IsEnabled = false;
+            _store!.Dispose();
+            _store = null;
+            Trace.Listeners.Remove(_logListener!);
+            _logListener!.Dispose();
+            await Task.Run(() => LocalData.Delete(DataDirectory));
+        }
+        catch (Exception ex)
+        {
+            // Report partial deletion without reopening the store or creating another log file.
+            MessageBox.Show($"Some data could not be removed ({ex.GetType().Name}). WinClip will quit.\n\n"
+                + $"Check this folder before restarting:\n{DataDirectory}", "Data deletion incomplete",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _pasteGate.Release();
+            Shutdown();
+        }
     }
 
     /// <summary>
