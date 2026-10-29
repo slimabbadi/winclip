@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using WinClip.Core;
@@ -256,6 +257,209 @@ public sealed class HistoryStoreTests : IDisposable
             Assert.Equal(-1, File.ReadAllBytes(file).AsSpan().IndexOf(stored));
     }
 
+    [Fact]
+    public void Unpinning_at_the_cap_never_deletes_the_unpinned_item()
+    {
+        using var store = CreateStore(maxUnpinned: 2);
+        var old = AddText(store, "old", null, T0);
+        store.SetPinned(old.Id, true);
+        AddText(store, "a", null, T0.AddSeconds(1));
+        AddText(store, "b", null, T0.AddSeconds(2));
+
+        store.SetPinned(old.Id, false);
+
+        Assert.Equal(["b", "old"], store.GetAll().Select(i => i.Text));
+        AssertMatchesReopen(store);
+    }
+
+    [Fact]
+    public void Unpinning_an_item_that_is_among_the_newest_trims_the_oldest()
+    {
+        using var store = CreateStore(maxUnpinned: 2);
+        AddText(store, "oldest", null, T0);
+        var pinned = AddText(store, "pinned", null, T0.AddSeconds(1));
+        store.SetPinned(pinned.Id, true);
+        AddText(store, "newest", null, T0.AddSeconds(2));
+
+        store.SetPinned(pinned.Id, false);
+
+        Assert.Equal(["newest", "pinned"], store.GetAll().Select(i => i.Text));
+    }
+
+    [Fact]
+    public void An_item_recorded_with_an_old_timestamp_at_the_cap_is_kept()
+    {
+        using var store = CreateStore(maxUnpinned: 2);
+        AddText(store, "a", null, T0.AddSeconds(5));
+        AddText(store, "b", null, T0.AddSeconds(6));
+
+        AddText(store, "late", null, T0);
+
+        Assert.Contains("late", store.GetAll().Select(i => i.Text));
+        Assert.Equal(2, store.GetAll().Count);
+    }
+
+    [Fact]
+    public void Unreadable_rows_are_skipped_and_counted_but_not_deleted()
+    {
+        var protector = new FlakyProtector();
+        using var store = new HistoryStore(DatabasePath, 100, protector);
+        AddText(store, "good", null, T0);
+        AddText(store, "poison text", null, T0.AddSeconds(1));
+        store.Add(new ClipContent(ClipKind.Image, "Image", new Dictionary<string, byte[]>(), Thumbnail: [0xEE, 0xEE]), null, T0.AddSeconds(2));
+        protector.FailOnContaining = [(byte)('p' ^ 0x5A), (byte)('o' ^ 0x5A), (byte)('i' ^ 0x5A)];
+        using var reader = new HistoryStore(DatabasePath, 100, protector);
+
+        Assert.Equal(["good", "Image"], reader.GetAll().Select(i => i.Text).Order());
+        Assert.Equal(1, reader.UnreadableItemCount);
+
+        protector.FailOnContaining = [];
+        using var recovered = new HistoryStore(DatabasePath, 100, protector);
+        Assert.Equal(3, recovered.GetAll().Count);
+        Assert.Equal(0, recovered.UnreadableItemCount);
+    }
+
+    [Fact]
+    public void Unreadable_thumbnails_are_skipped_too()
+    {
+        var protector = new FlakyProtector();
+        using (var store = new HistoryStore(DatabasePath, 100, protector))
+        {
+            AddText(store, "good", null, T0);
+            store.Add(new ClipContent(ClipKind.Image, "Image", new Dictionary<string, byte[]>(), Thumbnail: [1, 2, 3]), null, T0.AddSeconds(1));
+        }
+        protector.FailOnContaining = [1 ^ 0x5A, 2 ^ 0x5A];
+        using var reader = new HistoryStore(DatabasePath, 100, protector);
+
+        Assert.Equal("good", Assert.Single(reader.GetAll()).Text);
+        Assert.Equal(1, reader.UnreadableItemCount);
+    }
+
+    [Fact]
+    public void Unreadable_count_follows_deletes_and_clears()
+    {
+        var protector = new FlakyProtector();
+        using (var store = new HistoryStore(DatabasePath, 100, protector))
+        {
+            AddText(store, "poison one", null, T0);
+            store.SetPinned(AddText(store, "poison two", null, T0.AddSeconds(1)).Id, true);
+            AddText(store, "fine", null, T0.AddSeconds(2));
+        }
+        protector.FailOnContaining = [(byte)('p' ^ 0x5A), (byte)('o' ^ 0x5A), (byte)('i' ^ 0x5A)];
+        using var reader = new HistoryStore(DatabasePath, 100, protector);
+        reader.GetAll();
+        Assert.Equal(2, reader.UnreadableItemCount);
+
+        reader.ClearUnpinned();
+
+        Assert.Equal(1, reader.UnreadableItemCount);
+        Assert.Empty(reader.GetAll());
+    }
+
+    [Fact]
+    public void Snapshot_stays_consistent_with_a_fresh_reopen_after_every_kind_of_mutation()
+    {
+        using var store = CreateStore(maxUnpinned: 3);
+        Assert.Empty(store.GetAll()); // Load the snapshot first so each step below updates it incrementally.
+
+        var a = AddText(store, "a", "x", T0);
+        AssertMatchesReopen(store);
+        var b = AddText(store, "b", null, T0.AddSeconds(1));
+        AssertMatchesReopen(store);
+        AddText(store, "a", "y", T0.AddSeconds(2)); // Recopy.
+        AssertMatchesReopen(store);
+        store.Touch(b.Id, T0.AddSeconds(3));
+        AssertMatchesReopen(store);
+        store.SetPinned(a.Id, true);
+        AssertMatchesReopen(store);
+        AddText(store, "c", null, T0.AddSeconds(4));
+        AddText(store, "d", null, T0.AddSeconds(5));
+        AddText(store, "e", null, T0.AddSeconds(6)); // Trims "b".
+        AssertMatchesReopen(store);
+        Assert.DoesNotContain("b", store.GetAll().Select(i => i.Text));
+        store.SetPinned(a.Id, false);
+        AssertMatchesReopen(store);
+        store.MaxUnpinned = 1;
+        AssertMatchesReopen(store);
+        var f = AddText(store, "f", null, T0.AddSeconds(7));
+        store.Delete(f.Id);
+        AssertMatchesReopen(store);
+        store.SetPinned(AddText(store, "g", null, T0.AddSeconds(8)).Id, true);
+        AddText(store, "h", null, T0.AddSeconds(9));
+        store.ClearUnpinned();
+        AssertMatchesReopen(store);
+        Assert.Equal(["g"], store.GetAll().Select(i => i.Text));
+    }
+
+    [Fact]
+    public void GetAll_returns_a_snapshot_that_later_mutations_do_not_change()
+    {
+        using var store = CreateStore();
+        AddText(store, "one", null, T0);
+        var before = store.GetAll();
+
+        AddText(store, "two", null, T0.AddSeconds(1));
+
+        Assert.Equal(["one"], before.Select(i => i.Text));
+        Assert.Equal(["two", "one"], store.GetAll().Select(i => i.Text));
+        Assert.False(before is IList<ClipItem> { IsReadOnly: false });
+    }
+
+    [Fact]
+    public void Concurrent_use_keeps_the_store_consistent()
+    {
+        using var store = CreateStore(maxUnpinned: 20);
+        Parallel.For(0, 200, i =>
+        {
+            var item = AddText(store, $"item {i}", null, T0.AddSeconds(i));
+            store.Touch(item.Id, T0.AddSeconds(i + 1000));
+            Assert.NotNull(store.GetAll());
+            if (i % 7 == 0)
+                store.Delete(item.Id);
+        });
+
+        AssertMatchesReopen(store);
+    }
+
+    [Fact]
+    public void Item_text_is_shortened_but_the_full_text_stays_available_and_is_used_for_duplicates()
+    {
+        using var store = CreateStore();
+        var shared = new string('x', ClipItem.MaxTextLength);
+        var first = AddText(store, shared + "one", null, T0);
+        var second = AddText(store, shared + "two", null, T0.AddSeconds(1));
+
+        Assert.NotEqual(first.Id, second.Id);
+        Assert.All(store.GetAll(), item => Assert.Equal(shared, item.Text));
+        Assert.Equal(shared + "one", store.GetFullText(first.Id));
+        Assert.Equal(shared + "two", store.GetFullText(second.Id));
+        Assert.Null(store.GetFullText(9999));
+        Assert.Equal(2, AddText(store, shared + "one", null, T0.AddSeconds(2)).CopyCount);
+        Assert.Equal(2, store.GetAll().Count);
+    }
+
+    [Fact]
+    public void Shortening_does_not_split_a_surrogate_pair()
+    {
+        using var store = CreateStore();
+        AddText(store, new string('x', ClipItem.MaxTextLength - 1) + "😀tail", null, T0);
+
+        var text = Assert.Single(store.GetAll()).Text;
+
+        Assert.Equal(ClipItem.MaxTextLength - 1, text.Length);
+    }
+
+    private void AssertMatchesReopen(HistoryStore store)
+    {
+        static object[] Project(IReadOnlyList<ClipItem> items) => items
+            .Select(i => (object)(i.Id, i.Kind, i.Text, i.Thumbnail?.Length, i.IsRichText, i.SourceApp,
+                i.FirstCopiedAt, i.LastCopiedAt, i.CopyCount, i.Pinned))
+            .ToArray();
+
+        using var fresh = CreateStore(store.MaxUnpinned);
+        Assert.Equal(Project(fresh.GetAll()), Project(store.GetAll()));
+    }
+
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
@@ -268,5 +472,20 @@ public sealed class HistoryStoreTests : IDisposable
         public byte[] Protect(byte[] plaintext) => plaintext.Select(b => (byte)(b ^ 0x5A)).ToArray();
 
         public byte[] Unprotect(byte[] ciphertext) => Protect(ciphertext);
+    }
+
+    /// <summary>XOR-like protector that refuses to decrypt ciphertext containing a given byte sequence.</summary>
+    private sealed class FlakyProtector : IDataProtector
+    {
+        public byte[] FailOnContaining { get; set; } = [];
+
+        public byte[] Protect(byte[] plaintext) => plaintext.Select(b => (byte)(b ^ 0x5A)).ToArray();
+
+        public byte[] Unprotect(byte[] ciphertext)
+        {
+            if (FailOnContaining.Length > 0 && ciphertext.AsSpan().IndexOf(FailOnContaining) >= 0)
+                throw new CryptographicException("Simulated DPAPI failure.");
+            return Protect(ciphertext);
+        }
     }
 }

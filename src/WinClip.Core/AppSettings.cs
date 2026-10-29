@@ -37,10 +37,23 @@ public sealed record AppSettings
 
     public void Save(string path)
     {
-        // Write then swap, so a crash mid-write cannot leave a truncated settings file.
-        var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(this, JsonOptions));
-        File.Move(temporary, path, overwrite: true);
+        // Write, flush to disk, then swap, so a crash mid-write cannot leave a truncated settings file.
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        var temporary = Path.Combine(directory, $"{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                4096, FileOptions.WriteThrough))
+            {
+                file.Write(JsonSerializer.SerializeToUtf8Bytes(this, JsonOptions));
+                file.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(temporary); // No-op after a successful move.
+        }
     }
 
     /// <summary>A user-facing description of the first invalid value, or null when all are valid.</summary>

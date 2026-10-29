@@ -43,4 +43,59 @@ public sealed class ClipSearchTests
     {
         Assert.Equal(expected, ClipSearch.FuzzySpan(text, query));
     }
+
+    [Fact]
+    public void FuzzySpan_handles_long_adversarial_text()
+    {
+        var text = string.Concat(Enumerable.Repeat("aX", 1_000));
+
+        Assert.Null(ClipSearch.FuzzySpan(text, "ab"));
+        Assert.Equal(4, ClipSearch.FuzzySpan(text, "axax"));
+        Assert.Equal(2_000, ClipSearch.FuzzySpan(text, string.Concat(Enumerable.Repeat("ax", 1_000))));
+        Assert.Null(ClipSearch.FuzzySpan(text, string.Concat(Enumerable.Repeat("ax", 1_001))));
+    }
+
+    [Fact]
+    public void FuzzySpan_matches_a_brute_force_reference_on_random_text()
+    {
+        var random = new Random(1234);
+        const string alphabet = "abcAB_";
+        for (var round = 0; round < 2_000; round++)
+        {
+            var text = new string(Enumerable.Range(0, random.Next(0, 40)).Select(_ => alphabet[random.Next(alphabet.Length)]).ToArray());
+            var query = new string(Enumerable.Range(0, random.Next(1, 5)).Select(_ => alphabet[random.Next(alphabet.Length - 1)]).ToArray());
+
+            Assert.Equal(Reference(text, query), ClipSearch.FuzzySpan(text, query));
+        }
+    }
+
+    [Fact]
+    public void Filter_ignores_whitespace_in_a_fuzzy_query_and_is_case_insensitive()
+    {
+        var result = ClipSearch.Filter([Item("a_B_c"), Item("xyz")], "A b C");
+
+        Assert.Equal(["a_B_c"], result.Select(i => i.Text));
+    }
+
+    private static int? Reference(string text, string query)
+    {
+        var needle = query.Where(c => !char.IsWhiteSpace(c)).Select(char.ToLowerInvariant).ToArray();
+        int? best = null;
+        for (var start = 0; start < text.Length; start++)
+        {
+            var matched = 0;
+            var end = start;
+            for (var i = start; i < text.Length && matched < needle.Length; i++)
+            {
+                if (char.ToLowerInvariant(text[i]) == needle[matched])
+                {
+                    matched++;
+                    end = i;
+                }
+            }
+            if (matched == needle.Length && (best is null || end - start + 1 < best))
+                best = end - start + 1;
+        }
+        return best;
+    }
 }

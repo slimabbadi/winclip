@@ -18,10 +18,19 @@ public sealed class HistoryStore : IDisposable
     private const string Columns =
         "id, kind, text, thumbnail, rich, source_app, first_copied_at, last_copied_at, copy_count, pinned";
 
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    private readonly Lock _gate = new();
     private readonly SqliteConnection _connection;
     private readonly IDataProtector _protector;
     private readonly byte[] _hashKey;
     private int _maxUnpinned;
+
+    // Decrypted view of the table, loaded on first GetAll and kept in step with every mutation (guarded by _gate).
+    // Rows that failed to decrypt are not in it; _unreadable maps their id to whether they are pinned.
+    private Dictionary<long, ClipItem>? _snapshot;
+    private readonly Dictionary<long, bool> _unreadable = [];
+    private IReadOnlyList<ClipItem>? _ordered;
 
     public HistoryStore(string databasePath, int maxUnpinned, IDataProtector protector)
     {
@@ -57,62 +66,215 @@ public sealed class HistoryStore : IDisposable
         set
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
-            _maxUnpinned = value;
-            TrimUnpinned();
+            lock (_gate)
+            {
+                _maxUnpinned = value;
+                var removed = new List<long>();
+                InTransaction(() => removed = TrimUnpinned(keepId: null));
+                ApplyRemoved(removed);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Number of rows the last <see cref="GetAll"/> skipped because their text or thumbnail could not be
+    /// decrypted or decoded. They stay in the database, since decryption failures can be transient.
+    /// </summary>
+    public int UnreadableItemCount
+    {
+        get
+        {
+            lock (_gate)
+                return _unreadable.Count;
         }
     }
 
     /// <summary>Records a copy. A null <paramref name="sourceApp"/> keeps the source recorded earlier.</summary>
+    /// <returns>The stored item; its <see cref="ClipItem.Text"/> is shortened like in <see cref="GetAll"/>.</returns>
     public ClipItem Add(ClipContent content, string? sourceApp, DateTimeOffset now)
     {
-        ClipItem item = null!;
-        InTransaction(() =>
+        lock (_gate)
         {
-            item = Upsert(_hashKey, content, sourceApp, now);
-            TrimUnpinned();
-        });
-        return item;
+            ClipItem item = null!;
+            var removed = new List<long>();
+            InTransaction(() =>
+            {
+                item = Upsert(_hashKey, content, sourceApp, now);
+                // Never trim the item just recorded, even when it is older than everything else.
+                removed = TrimUnpinned(item.Pinned ? null : item.Id);
+            });
+            if (_snapshot is not null)
+            {
+                _snapshot[item.Id] = item;
+                _unreadable.Remove(item.Id);
+                _ordered = null;
+            }
+            ApplyRemoved(removed);
+            return item;
+        }
     }
 
-    /// <summary>Pinned items first, then most recently copied.</summary>
+    /// <summary>
+    /// Pinned items first, then most recently copied. The list is an immutable snapshot, safe to hold on
+    /// any thread; an item's <see cref="ClipItem.Text"/> is shortened to <see cref="ClipItem.MaxTextLength"/>.
+    /// </summary>
     public IReadOnlyList<ClipItem> GetAll()
     {
-        using var command = Command($"SELECT {Columns} FROM items ORDER BY pinned DESC, last_copied_at DESC, id DESC;");
-        using var reader = command.ExecuteReader();
-        var items = new List<ClipItem>();
-        while (reader.Read())
-            items.Add(ReadItem(reader));
-        return items;
+        lock (_gate)
+        {
+            EnsureLoaded();
+            return _ordered ??= BuildOrdered();
+        }
+    }
+
+    /// <summary>The complete text of an item, or null when it no longer exists.</summary>
+    /// <exception cref="CryptographicException">The stored text cannot be decrypted.</exception>
+    public string? GetFullText(long id)
+    {
+        lock (_gate)
+        {
+            using var command = Command("SELECT text FROM items WHERE id = $id;", ("$id", id));
+            return command.ExecuteScalar() is byte[] stored ? DecodeText(stored) : null;
+        }
     }
 
     /// <summary>The extra formats stored for an item, keyed by <see cref="ClipFormat"/> names.</summary>
     public IReadOnlyDictionary<string, byte[]> GetFormats(long id)
     {
-        using var command = Command("SELECT name, data FROM formats WHERE item_id = $id;", ("$id", id));
-        using var reader = command.ExecuteReader();
-        var formats = new Dictionary<string, byte[]>();
-        while (reader.Read())
-            formats[reader.GetString(0)] = _protector.Unprotect(reader.GetFieldValue<byte[]>(1));
-        return formats;
+        lock (_gate)
+        {
+            using var command = Command("SELECT name, data FROM formats WHERE item_id = $id;", ("$id", id));
+            using var reader = command.ExecuteReader();
+            var formats = new Dictionary<string, byte[]>();
+            while (reader.Read())
+                formats[reader.GetString(0)] = _protector.Unprotect(reader.GetFieldValue<byte[]>(1));
+            return formats;
+        }
     }
 
     /// <summary>Moves an item to the top, as when it is pasted from history.</summary>
-    public void Touch(long id, DateTimeOffset now) => Execute(
-        "UPDATE items SET last_copied_at = $now, copy_count = copy_count + 1 WHERE id = $id;",
-        ("$now", now.ToUnixTimeMilliseconds()), ("$id", id));
-
-    public void SetPinned(long id, bool pinned)
+    public void Touch(long id, DateTimeOffset now)
     {
-        Execute("UPDATE items SET pinned = $pinned WHERE id = $id;", ("$pinned", pinned ? 1 : 0), ("$id", id));
-        if (!pinned)
-            TrimUnpinned();
+        lock (_gate)
+        {
+            var changed = Execute(
+                "UPDATE items SET last_copied_at = $now, copy_count = copy_count + 1 WHERE id = $id;",
+                ("$now", now.ToUnixTimeMilliseconds()), ("$id", id));
+            if (changed > 0 && _snapshot is not null && _snapshot.TryGetValue(id, out var item))
+            {
+                _snapshot[id] = item with { LastCopiedAt = now, CopyCount = item.CopyCount + 1 };
+                _ordered = null;
+            }
+        }
     }
 
-    public void Delete(long id) => Execute("DELETE FROM items WHERE id = $id;", ("$id", id));
+    /// <summary>Pins or unpins an item. Unpinning never deletes that item; a later <see cref="Add"/> trims normally.</summary>
+    public void SetPinned(long id, bool pinned)
+    {
+        lock (_gate)
+        {
+            var removed = new List<long>();
+            var changed = 0;
+            InTransaction(() =>
+            {
+                changed = Execute("UPDATE items SET pinned = $pinned WHERE id = $id;", ("$pinned", pinned ? 1 : 0), ("$id", id));
+                if (!pinned && changed > 0)
+                    removed = TrimUnpinned(keepId: id);
+            });
+            if (changed > 0)
+            {
+                if (_snapshot is not null && _snapshot.TryGetValue(id, out var item))
+                    _snapshot[id] = item with { Pinned = pinned };
+                if (_unreadable.ContainsKey(id))
+                    _unreadable[id] = pinned;
+                _ordered = null;
+            }
+            ApplyRemoved(removed);
+        }
+    }
 
-    public void ClearUnpinned() => Execute("DELETE FROM items WHERE pinned = 0;");
+    public void Delete(long id)
+    {
+        lock (_gate)
+        {
+            Execute("DELETE FROM items WHERE id = $id;", ("$id", id));
+            ApplyRemoved([id]);
+        }
+    }
 
-    public void Dispose() => _connection.Dispose();
+    public void ClearUnpinned()
+    {
+        lock (_gate)
+        {
+            Execute("DELETE FROM items WHERE pinned = 0;");
+            if (_snapshot is not null)
+            {
+                foreach (var id in _snapshot.Values.Where(item => !item.Pinned).Select(item => item.Id).ToList())
+                    _snapshot.Remove(id);
+            }
+            foreach (var id in _unreadable.Where(entry => !entry.Value).Select(entry => entry.Key).ToList())
+                _unreadable.Remove(id);
+            _ordered = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_gate)
+            _connection.Dispose();
+    }
+
+    private void EnsureLoaded()
+    {
+        if (_snapshot is not null)
+            return;
+
+        var loaded = new Dictionary<long, ClipItem>();
+        _unreadable.Clear();
+        using var command = Command($"SELECT {Columns} FROM items;");
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            try
+            {
+                var item = ReadItem(reader,
+                    ClipItem.Shorten(DecodeText(reader.GetFieldValue<byte[]>(2))),
+                    reader.IsDBNull(3) ? null : _protector.Unprotect(reader.GetFieldValue<byte[]>(3)));
+                loaded[item.Id] = item;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                _unreadable[reader.GetInt64(0)] = reader.GetInt64(9) != 0;
+            }
+        }
+        _snapshot = loaded;
+    }
+
+    private IReadOnlyList<ClipItem> BuildOrdered()
+    {
+        var items = _snapshot!.Values.ToArray();
+        Array.Sort(items, (a, b) =>
+        {
+            if (a.Pinned != b.Pinned)
+                return a.Pinned ? -1 : 1;
+            var byTime = b.LastCopiedAt.CompareTo(a.LastCopiedAt);
+            return byTime != 0 ? byTime : b.Id.CompareTo(a.Id);
+        });
+        return Array.AsReadOnly(items);
+    }
+
+    private void ApplyRemoved(IReadOnlyCollection<long> ids)
+    {
+        foreach (var id in ids)
+        {
+            _snapshot?.Remove(id);
+            _unreadable.Remove(id);
+        }
+        if (ids.Count > 0)
+            _ordered = null;
+    }
+
+    private string DecodeText(byte[] stored) => StrictUtf8.GetString(_protector.Unprotect(stored));
 
     private ClipItem Upsert(byte[] hashKey, ClipContent content, string? sourceApp, DateTimeOffset now)
     {
@@ -131,7 +293,7 @@ public sealed class HistoryStore : IDisposable
             """,
             ("$hash", Hash(hashKey, content)),
             ("$kind", (int)content.Kind),
-            ("$text", _protector.Protect(Encoding.UTF8.GetBytes(content.Text))),
+            ("$text", _protector.Protect(StrictUtf8.GetBytes(content.Text))),
             ("$thumbnail", content.Thumbnail is null ? DBNull.Value : _protector.Protect(content.Thumbnail)),
             ("$rich", IsRich(content.Formats) ? 1 : 0),
             ("$source", (object?)sourceApp ?? DBNull.Value),
@@ -139,7 +301,7 @@ public sealed class HistoryStore : IDisposable
         using (var reader = command.ExecuteReader())
         {
             reader.Read();
-            item = ReadItem(reader);
+            item = ReadItem(reader, ClipItem.Shorten(content.Text), content.Thumbnail);
         }
 
         // A re-copy may carry different formats (say, the same text without formatting); keep the latest.
@@ -152,10 +314,28 @@ public sealed class HistoryStore : IDisposable
         return item;
     }
 
-    private void TrimUnpinned() => Execute("""
-        DELETE FROM items WHERE pinned = 0 AND id NOT IN (
-            SELECT id FROM items WHERE pinned = 0 ORDER BY last_copied_at DESC, id DESC LIMIT $max);
-        """, ("$max", _maxUnpinned));
+    /// <summary>
+    /// Deletes unpinned items beyond the cap, oldest first, and returns their ids. <paramref name="keepId"/> is
+    /// exempt and counts toward the cap, so the item the caller just wrote or unpinned is never the one dropped.
+    /// </summary>
+    private List<long> TrimUnpinned(long? keepId)
+    {
+        var removed = new List<long>();
+        if (Scalar("SELECT COUNT(*) FROM items WHERE pinned = 0;") <= _maxUnpinned)
+            return removed;
+
+        using var command = Command("""
+            DELETE FROM items WHERE id IN (
+                SELECT id FROM items WHERE pinned = 0 AND id IS NOT $keep
+                ORDER BY last_copied_at DESC, id DESC LIMIT -1 OFFSET $offset)
+            RETURNING id;
+            """,
+            ("$keep", keepId is { } id ? id : DBNull.Value), ("$offset", _maxUnpinned - (keepId is null ? 0 : 1)));
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+            removed.Add(reader.GetInt64(0));
+        return removed;
+    }
 
     private byte[] LoadOrCreateHashKey()
     {
@@ -258,10 +438,10 @@ public sealed class HistoryStore : IDisposable
         return command;
     }
 
-    private void Execute(string sql, params (string Name, object Value)[] parameters)
+    private int Execute(string sql, params (string Name, object Value)[] parameters)
     {
         using var command = Command(sql, parameters);
-        command.ExecuteNonQuery();
+        return command.ExecuteNonQuery();
     }
 
     private long Scalar(string sql)
@@ -270,11 +450,11 @@ public sealed class HistoryStore : IDisposable
         return (long)command.ExecuteScalar()!;
     }
 
-    private ClipItem ReadItem(SqliteDataReader reader) => new(
+    private static ClipItem ReadItem(SqliteDataReader reader, string text, byte[]? thumbnail) => new(
         Id: reader.GetInt64(0),
         Kind: (ClipKind)reader.GetInt32(1),
-        Text: Encoding.UTF8.GetString(_protector.Unprotect(reader.GetFieldValue<byte[]>(2))),
-        Thumbnail: reader.IsDBNull(3) ? null : _protector.Unprotect(reader.GetFieldValue<byte[]>(3)),
+        Text: text,
+        Thumbnail: thumbnail,
         IsRichText: reader.GetInt64(4) != 0,
         SourceApp: reader.IsDBNull(5) ? null : reader.GetString(5),
         FirstCopiedAt: DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(6)),
