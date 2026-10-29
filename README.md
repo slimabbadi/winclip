@@ -79,6 +79,8 @@ Open **Settings…** from the tray icon menu. Changes apply when you click **Sav
 
 Settings are saved to `%LOCALAPPDATA%\WinClip\settings.json`.
 
+**Delete all local data…** in Settings removes all history including pins, settings, and logs after confirmation, turns off Start with Windows, and quits. Cancel leaves the data intact. The Windows clipboard and unrelated files you placed in the data folder are left alone. This removes WinClip's files; it does not guarantee forensic erasure from SSDs, backups, or filesystem snapshots.
+
 <br clear="right">
 
 ## Privacy
@@ -134,7 +136,9 @@ Files appear in `artifacts/release-0.2.0-alpha.1/packages`. The script restores 
 
 Push a version tag such as `v0.2.0-alpha.1` to run `.github/workflows/release.yml`. It builds and tests before packaging, uploads a workflow artifact, creates a draft GitHub release, adds checksums, then publishes it. Versions containing `-` are marked as prereleases. If upload fails, the release stays a draft; inspect it before retrying. Published tag names must be unique.
 
-To test packaging without publishing, run the workflow manually with a version. Local builds and GitHub Actions use the same packaging script. Source commits, tool versions, and checksums identify releases; the binaries are currently unsigned.
+To test packaging without publishing, run the workflow manually with a version. Local builds and GitHub Actions use the same packaging script. Source commits, tool versions, and checksums identify releases; the binaries are currently unsigned. Future tag publication is blocked until trusted signing is configured. See the [code signing plan](docs/code-signing.md).
+
+Run **Verify lifecycle** in GitHub Actions to test the published 0.2.0 installer against a candidate update on a fresh hosted Windows runner. It checks encrypted history and pin retention, bundled-runtime loading, update download/apply/restart, deletion cancellation and confirmation through the real Settings window, and uninstall data retention. The runner has an SDK installed, so bundled-runtime loading is checked directly rather than claiming a machine without .NET. The previous app is stopped before applying the update; a handoff while active history writes are queued still needs separate coverage. The script refuses to run on your workstation or over existing WinClip data.
 
 ## Support
 

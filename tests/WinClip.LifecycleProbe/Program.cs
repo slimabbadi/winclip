@@ -78,6 +78,9 @@ internal static class Program
             if (element is not null) return element;
             await Task.Delay(200);
         }
+        var windows = AutomationElement.RootElement.FindAll(TreeScope.Children, Condition.TrueCondition);
+        foreach (AutomationElement window in windows)
+            Console.Error.WriteLine($"Visible automation window: {window.Current.Name} (PID {window.Current.ProcessId})");
         throw new TimeoutException($"UI element not found: {text}");
     }
 

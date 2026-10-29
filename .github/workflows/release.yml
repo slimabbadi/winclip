@@ -50,6 +50,9 @@ jobs:
           exit $code
       - name: Package
         run: ./scripts/release.ps1 -Version $env:RELEASE_VERSION
+      - name: Require trusted signatures before publishing
+        if: github.event_name == 'push'
+        run: ./scripts/verify-signatures.ps1 -PackageDirectory "artifacts/release-$env:RELEASE_VERSION/packages"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: WinClip-${{ env.RELEASE_VERSION }}

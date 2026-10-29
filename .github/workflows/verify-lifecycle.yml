@@ -29,6 +29,13 @@ jobs:
         run: ./scripts/release.ps1 -Version 0.2.1-lifecycle
       - name: Install, update, delete data and uninstall
         run: ./scripts/verify-lifecycle.ps1 -PackageDirectory artifacts/release-0.2.1-lifecycle/packages
+      - name: Collect diagnostic logs
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force artifacts/lifecycle/logs | Out-Null
+          foreach ($file in "$env:LOCALAPPDATA/WinClip/winclip.log", "$env:LOCALAPPDATA/velopack/velopack.log") {
+            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination artifacts/lifecycle/logs }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -37,6 +44,4 @@ jobs:
             artifacts/lifecycle/**
             artifacts/release-0.2.1-lifecycle/packages/*.json
             artifacts/release-0.2.1-lifecycle/packages/SHA256SUMS.txt
-            ~/AppData/Local/WinClip/winclip.log
-            ~/AppData/Local/velopack/velopack.log
           if-no-files-found: warn
