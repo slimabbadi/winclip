@@ -94,6 +94,10 @@ dotnet run --project src/WinClip
 | `scripts/e2e-smoke.ps1` | End-to-end test on the real desktop. It types for you, so leave the keyboard alone while it runs. |
 | `scripts/make-icon.ps1` | Regenerates the app icon. |
 
+## Support
+
+WinClip is free. If it saves you time, you can [buy me a coffee](https://buymeacoffee.com/slimabbadi).
+
 ## License
 
 [MIT](LICENSE)
