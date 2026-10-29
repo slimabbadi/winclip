@@ -17,11 +17,24 @@ Press **Ctrl+Alt+V** anywhere, type a few letters, and press **Enter** to paste 
 - **Pins.** Pinned items stay at the top and are never trimmed or cleared.
 - **Pastes where you were typing.** The popup opens at the text cursor in apps that report it (otherwise at the mouse), and the chosen item is pasted into the app you came from.
 - **Private by default.** History is encrypted with your Windows account, password-manager copies are skipped, and you can pause recording or exclude apps.
-- **Small.** A tray app under 3 MB with no account, no network access and no telemetry.
+- **Light.** A tray app with no account, no network access and no telemetry.
 
 ## Install
 
-WinClip is built for Windows 11 (Windows 10 should work but is untested) and needs the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build.
+> **Alpha.** WinClip is early software. Expect rough edges, and please [report problems](https://github.com/slimabbadi/winclip/issues).
+
+WinClip is built for Windows 11 on 64-bit PCs. Windows 10 should work but is untested.
+
+1. Download an exe from the [latest release](https://github.com/slimabbadi/winclip/releases):
+   - **`WinClip-<version>-win-x64.exe`** runs as is.
+   - **`WinClip-<version>-win-x64-small.exe`** is about 2.5 MB but needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
+2. Put it somewhere permanent, such as `%LOCALAPPDATA%\Programs\WinClip`, and double-click it. WinClip lives in the tray; turn on **Start with Windows** in Settings to keep it running.
+
+The exe isn't code-signed yet, so Windows SmartScreen will warn that it's from an unknown publisher. Choose **More info**, then **Run anyway**. Each release lists SHA-256 checksums if you want to verify the download.
+
+### Build from source
+
+With the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0):
 
 ```powershell
 git clone https://github.com/slimabbadi/winclip.git
@@ -29,9 +42,7 @@ cd winclip
 pwsh scripts\publish.ps1
 ```
 
-This builds `dist\WinClip.exe` and adds **WinClip** shortcuts to the Start Menu and Desktop. Double-click either one to start it; WinClip lives in the tray. Starting it again while it runs opens Settings.
-
-The exe needs the .NET 10 Desktop Runtime, which the SDK includes. Pass `-SelfContained` for a larger exe that runs on machines without .NET.
+This builds `dist\WinClip.exe` and adds **WinClip** shortcuts to the Start Menu and Desktop. Starting it again while it runs opens Settings. Pass `-SelfContained` for an exe that runs without .NET installed.
 
 ## Keys
 
