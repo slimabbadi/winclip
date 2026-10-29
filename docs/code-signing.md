@@ -4,11 +4,11 @@ WinClip releases are currently unsigned. No signing provider is configured. The 
 
 ## Provider choice
 
-The selected route is to apply to SignPath Foundation first. The application is being prepared; it has not yet been submitted or approved.
+The selected route is to apply to SignPath Foundation first. The application was filled and submission was attempted on 29 October 2026 with the maintainer's approval. The form has not displayed a receipt or success confirmation; receipt is unverified and Foundation approval is pending. Check the notification email before resubmitting to avoid duplicate applications.
 
 The maintainer publishes as an individual in Germany. Microsoft's [Artifact Signing prerequisites](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart) currently limit public-trust individual enrollment to the US and Canada, so that service is not available for this identity.
 
-[SignPath Foundation](https://signpath.org/terms) offers signing for qualifying open-source projects. Acceptance is discretionary and requires a verifiable reputation, published software, a public signing policy, MFA, verifiable hosted builds, and manual approval of signing requests. The certificate identifies SignPath Foundation as publisher. WinClip has not applied or been approved.
+[SignPath Foundation](https://signpath.org/terms) offers signing for qualifying open-source projects. Acceptance is discretionary and requires a verifiable reputation, published software, a public signing policy, MFA, verifiable hosted builds, and manual approval of signing requests. The certificate identifies SignPath Foundation as publisher. WinClip has not been approved.
 
 If acceptance or the Foundation publisher identity is unsuitable, use a paid public-trust certificate provider that accepts German individuals. Confirm eligibility, identity requirements, price, and secure CI signing support before purchasing. Do not use a self-signed certificate for public distribution.
 
