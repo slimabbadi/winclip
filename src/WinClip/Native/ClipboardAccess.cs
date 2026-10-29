@@ -9,11 +9,25 @@ namespace WinClip.Native;
 internal sealed record RawClipboard(string[]? Files, string? Text, byte[]? Html, byte[]? Rtf, byte[]? Png, byte[]? Dib);
 
 /// <summary>
+/// Bounds enforced while the clipboard is open, so an oversized copy is dropped before it is copied out of
+/// shared memory, decoded and encrypted.
+/// </summary>
+internal sealed record ClipboardLimits(int MaxTextChars, int MaxImageBytes)
+{
+    /// <summary>Clipboard text is UTF-16, so its size in shared memory is twice the character count.</summary>
+    public long MaxTextBytes => (long)MaxTextChars * 2;
+}
+
+/// <summary>
 /// Raw Win32 clipboard access. Other apps briefly hold the clipboard open after writing to it,
 /// so opening retries with a short backoff instead of failing on the first attempt.
 /// </summary>
 internal static class ClipboardAccess
 {
+    // A folder tree dropped on the clipboard can hold far more paths than history should keep.
+    private const int MaxFileCount = 10_000;
+    private const int MaxPathLength = 32_767;
+
     private static readonly uint ExcludeFromMonitoring = RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing");
     private static readonly uint ViewerIgnore = RegisterClipboardFormat("Clipboard Viewer Ignore");
     private static readonly uint CanIncludeInHistory = RegisterClipboardFormat("CanIncludeInClipboardHistory");
@@ -22,35 +36,53 @@ internal static class ClipboardAccess
     private static readonly uint PngFormat = RegisterClipboardFormat("PNG");
     private static readonly uint PreferredDropEffect = RegisterClipboardFormat("Preferred DropEffect");
 
+    private static long _ownWriteSequence;
+
     /// <summary>
     /// True when the current contents carry one of the markers password managers set to keep
-    /// secrets out of clipboard history.
+    /// secrets out of clipboard history. Only a cheap check: the read repeats it once the clipboard is open.
     /// </summary>
     public static bool IsMarkedPrivate() =>
         IsClipboardFormatAvailable(ExcludeFromMonitoring) || IsClipboardFormatAvailable(ViewerIgnore);
 
+    /// <summary>True when <paramref name="sequence"/> is the clipboard change WinClip itself last wrote.</summary>
+    public static bool IsOwnWrite(uint sequence) =>
+        sequence != 0 && sequence == (uint)Interlocked.Read(ref _ownWriteSequence);
+
     /// <summary>Reads the clipboard, or null when it can't be opened or the contents opted out of history.</summary>
-    public static async Task<RawClipboard?> TryReadAsync(IntPtr owner)
+    public static async Task<RawClipboard?> TryReadAsync(IntPtr owner, ClipboardLimits limits)
     {
         if (!await TryOpenAsync(owner))
             return null;
         try
         {
-            if (IsClipboardFormatAvailable(CanIncludeInHistory) && ReadBytes(CanIncludeInHistory) is { Length: >= 4 } flag
-                && BitConverter.ToInt32(flag) == 0)
+            // The markers are checked again here: the pre-check runs before the clipboard is opened, and
+            // another app can mark or replace the contents in between.
+            if (IsMarkedPrivateWhileOpen())
                 return null;
 
-            var files = IsClipboardFormatAvailable(CF_HDROP) ? ReadFiles() : null;
-            var text = IsClipboardFormatAvailable(CF_UNICODETEXT) ? ReadText() : null;
+            string[]? files = null;
+            if (IsClipboardFormatAvailable(CF_HDROP) && !TryReadFiles(limits, out files))
+                return null;
+
+            string? text = null;
+            if (IsClipboardFormatAvailable(CF_UNICODETEXT))
+            {
+                // Over the limit or unreadable: skip the copy rather than store a truncated version of it.
+                if (ReadBytes(CF_UNICODETEXT, limits.MaxTextBytes) is not { } textBytes)
+                    return null;
+                text = DecodeText(textBytes);
+            }
+
             var hasText = !string.IsNullOrWhiteSpace(text);
             var wantImage = files is null && !hasText;
             return new RawClipboard(
                 files,
                 text,
-                hasText ? TrimNulls(ReadBytes(HtmlFormat)) : null,
-                hasText ? TrimNulls(ReadBytes(RtfFormat)) : null,
-                wantImage ? ReadBytes(PngFormat) : null,
-                wantImage && !IsClipboardFormatAvailable(PngFormat) ? ReadBytes(CF_DIB) : null);
+                hasText ? TrimNulls(ReadBytes(HtmlFormat, limits.MaxTextBytes)) : null,
+                hasText ? TrimNulls(ReadBytes(RtfFormat, limits.MaxTextBytes)) : null,
+                wantImage ? ReadBytes(PngFormat, limits.MaxImageBytes) : null,
+                wantImage && !IsClipboardFormatAvailable(PngFormat) ? ReadBytes(CF_DIB, limits.MaxImageBytes) : null);
         }
         finally
         {
@@ -91,7 +123,13 @@ internal static class ClipboardAccess
             return false;
         try
         {
-            return EmptyClipboard() && entries.All(entry => SetBytes(entry.Format, entry.Data));
+            if (!EmptyClipboard() || !entries.All(entry => SetBytes(entry.Format, entry.Data)))
+                return false;
+
+            // Remember the clipboard state WinClip just produced. Its update notification looks exactly like
+            // a real copy, so the monitor ignores the one whose sequence number matches this value.
+            Interlocked.Exchange(ref _ownWriteSequence, GetClipboardSequenceNumber());
+            return true;
         }
         finally
         {
@@ -120,17 +158,38 @@ internal static class ClipboardAccess
         return false;
     }
 
-    private static byte[]? ReadBytes(uint format)
+    /// <summary>
+    /// All three markers password managers set, read with the clipboard open. A marker whose value cannot be
+    /// read counts as private: missing a copy beats recording a secret.
+    /// </summary>
+    private static bool IsMarkedPrivateWhileOpen()
+    {
+        if (IsClipboardFormatAvailable(ExcludeFromMonitoring) || IsClipboardFormatAvailable(ViewerIgnore))
+            return true;
+        if (!IsClipboardFormatAvailable(CanIncludeInHistory))
+            return false;
+        return ReadBytes(CanIncludeInHistory, sizeof(int)) is not { Length: >= 4 } flag
+            || BitConverter.ToInt32(flag) == 0;
+    }
+
+    /// <summary>
+    /// Copies one clipboard format out of shared memory, or returns null when it is unavailable, unreadable
+    /// or larger than <paramref name="maxBytes"/>. The size is checked before anything is allocated.
+    /// </summary>
+    private static byte[]? ReadBytes(uint format, long maxBytes)
     {
         var handle = GetClipboardData(format);
         if (handle == IntPtr.Zero)
+            return null;
+        var size = (ulong)GlobalSize(handle);
+        if (size > (ulong)Math.Min(maxBytes, int.MaxValue))
             return null;
         var pointer = GlobalLock(handle);
         if (pointer == IntPtr.Zero)
             return null;
         try
         {
-            var bytes = new byte[(int)Math.Min((ulong)GlobalSize(handle), int.MaxValue)];
+            var bytes = new byte[(int)size];
             Marshal.Copy(pointer, bytes, 0, bytes.Length);
             return bytes;
         }
@@ -140,30 +199,47 @@ internal static class ClipboardAccess
         }
     }
 
-    private static string? ReadText()
+    private static string DecodeText(byte[] bytes)
     {
-        if (ReadBytes(CF_UNICODETEXT) is not { } bytes)
-            return null;
         // Bounded by the allocation, which may be larger than the text; stop at the terminator.
         var text = Encoding.Unicode.GetString(bytes, 0, bytes.Length & ~1);
         var terminator = text.IndexOf('\0');
         return terminator >= 0 ? text[..terminator] : text;
     }
 
-    private static string[]? ReadFiles()
+    /// <summary>
+    /// Reads the dropped paths, or returns false when the list is larger than history should hold: too many
+    /// files, or more path text than the copy limit allows.
+    /// </summary>
+    private static bool TryReadFiles(ClipboardLimits limits, out string[]? files)
     {
+        files = null;
         var drop = GetClipboardData(CF_HDROP);
         if (drop == IntPtr.Zero)
-            return null;
+            return true;
         var count = DragQueryFile(drop, uint.MaxValue, null, 0);
-        var files = new string[count];
+        if (count > MaxFileCount)
+            return false;
+
+        var paths = new List<string>((int)count);
+        long totalLength = 0;
         for (uint i = 0; i < count; i++)
         {
-            var buffer = new char[DragQueryFile(drop, i, null, 0) + 1];
+            var needed = DragQueryFile(drop, i, null, 0);
+            // A path longer than the Windows limit is not a real file; skip it rather than grow the buffer blindly.
+            if (needed == 0 || needed > MaxPathLength)
+                continue;
+            totalLength += needed;
+            if (totalLength > limits.MaxTextChars)
+                return false;
+            var buffer = new char[needed + 1];
             var length = DragQueryFile(drop, i, buffer, (uint)buffer.Length);
-            files[i] = new string(buffer, 0, (int)length);
+            if (length > 0)
+                paths.Add(new string(buffer, 0, (int)length));
         }
-        return files.Length == 0 ? null : files;
+
+        files = paths.Count == 0 ? null : paths.ToArray();
+        return true;
     }
 
     private static bool SetBytes(uint format, byte[] data)

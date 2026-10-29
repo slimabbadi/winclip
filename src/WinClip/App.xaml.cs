@@ -2,10 +2,14 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Threading;
 using WinClip.Core;
 using WinClip.Native;
 
 namespace WinClip;
+
+/// <summary>An item plus exactly the formats its clipboard write needs.</summary>
+internal sealed record PasteRequest(ClipItem Item, IReadOnlyDictionary<string, byte[]> Formats);
 
 public partial class App : Application
 {
@@ -13,12 +17,17 @@ public partial class App : Application
     private static readonly string DataDirectory =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinClip");
     private static readonly string SettingsPath = Path.Combine(DataDirectory, "settings.json");
+    private static readonly string LogPath = Path.Combine(DataDirectory, "winclip.log");
+    private static readonly IReadOnlyDictionary<string, byte[]> NoFormats = new Dictionary<string, byte[]>();
 
     // Launching WinClip again while it runs signals this event, and the running copy opens Settings.
     private const string OpenSettingsEventName = @"Local\WinClip.OpenSettings";
 
     // Bigger images (say, an 8K screenshot) would bloat history and stall encryption; they are skipped.
     private const int MaxImageBytes = 32 * 1024 * 1024;
+
+    private readonly Lock _writeGate = new();
+    private readonly SemaphoreSlim _pasteGate = new(1, 1);
 
     private Mutex? _singleInstance;
     private EventWaitHandle? _openSettingsSignal;
@@ -31,46 +40,80 @@ public partial class App : Application
     private PopupWindow? _popup;
     private SettingsWindow? _settingsWindow;
     private TrayIcon? _tray;
+    private Task _storeWrites = Task.CompletedTask;
+    private bool _startupCompleted;
+    private bool _startupFailureShown;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
+        DispatcherUnhandledException += OnUnhandledException;
+        try
+        {
+            Start(e);
+        }
+        catch (Exception ex)
+        {
+            // Without this the app would keep running invisibly, holding the single-instance mutex.
+            ShowStartupFailure(ex);
+        }
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        // Queued history writes are short; letting them finish keeps the last copy the user made.
+        try
+        {
+            _storeWrites.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch (AggregateException)
+        {
+            // The write already logged its own failure.
+        }
+        _openSettingsWait?.Unregister(null);
+        _openSettingsSignal?.Dispose();
+        _tray?.Dispose();
+        _hotkey?.Dispose();
+        _monitor?.Dispose();
+        _messages?.Dispose();
+        _store?.Dispose();
+        _singleInstance?.Dispose();
+        base.OnExit(e);
+    }
+
+    private void Start(StartupEventArgs e)
+    {
+        // The event exists before the mutex is taken, so a launch during startup can always deliver its request.
+        _openSettingsSignal = new EventWaitHandle(false, EventResetMode.AutoReset, OpenSettingsEventName);
         _singleInstance = new Mutex(initiallyOwned: true, @"Local\WinClip.SingleInstance", out var isFirstInstance);
         if (!isFirstInstance)
         {
-            if (EventWaitHandle.TryOpenExisting(OpenSettingsEventName, out var signal))
-                using (signal)
-                    signal.Set();
+            _openSettingsSignal.Set();
             Shutdown();
             return;
         }
-        _openSettingsSignal = new EventWaitHandle(false, EventResetMode.AutoReset, OpenSettingsEventName);
-        _openSettingsWait = ThreadPool.RegisterWaitForSingleObject(_openSettingsSignal,
-            (_, _) => Dispatcher.BeginInvoke(OpenSettings), null, Timeout.Infinite, executeOnlyOnce: false);
 
         Directory.CreateDirectory(DataDirectory);
-        Trace.Listeners.Add(new TextWriterTraceListener(Path.Combine(DataDirectory, "winclip.log")));
+        Trace.Listeners.Add(new TextWriterTraceListener(LogPath));
         Trace.AutoFlush = true;
-        DispatcherUnhandledException += (_, args) =>
-        {
-            Trace.TraceError($"Unhandled: {args.Exception}");
-            args.Handled = true;
-        };
+
+        _openSettingsWait = ThreadPool.RegisterWaitForSingleObject(_openSettingsSignal,
+            (_, _) => Dispatcher.BeginInvoke(OpenSettings), null, Timeout.Infinite, executeOnlyOnce: false);
 
         string? settingsError = null;
         try
         {
             _settings = AppSettings.LoadOrCreate(SettingsPath);
         }
-        catch (JsonException ex)
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
             settingsError = $"Your settings file is invalid, so defaults are in use. {ex.Message}";
         }
 
         _store = new HistoryStore(Path.Combine(DataDirectory, "history.db"), _settings.MaxItems, new DpapiProtector());
         _messages = new MessageWindow();
-        _monitor = new ClipboardMonitor(_messages);
+        _monitor = new ClipboardMonitor(_messages, ClipboardLimitsFor(_settings));
         _monitor.Captured += OnCaptured;
         _popup = new PopupWindow(_store);
         _popup.ItemChosen += OnItemChosen;
@@ -90,19 +133,40 @@ public partial class App : Application
         else if (!e.Args.Contains(StartupRegistration.BackgroundArgument))
             _tray.Notify("WinClip is running",
                 $"Press {Describe(_settings.Hotkey)} to open your clipboard history. Settings are in the tray icon menu.");
+
+        _startupCompleted = true;
     }
 
-    protected override void OnExit(ExitEventArgs e)
+    private void OnUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs args)
     {
-        _openSettingsWait?.Unregister(null);
-        _openSettingsSignal?.Dispose();
-        _tray?.Dispose();
-        _hotkey?.Dispose();
-        _monitor?.Dispose();
-        _messages?.Dispose();
-        _store?.Dispose();
-        _singleInstance?.Dispose();
-        base.OnExit(e);
+        LogFailure("Unhandled exception", args.Exception);
+        args.Handled = true;
+        // A failure while starting up leaves nothing running: no tray icon, no hotkey, no window to close the
+        // app with, so it has to shut down rather than sit there holding the single-instance mutex.
+        if (!_startupCompleted)
+            ShowStartupFailure(args.Exception);
+    }
+
+    private void ShowStartupFailure(Exception ex)
+    {
+        LogFailure("Startup failed", ex);
+        if (_startupFailureShown || Dispatcher.HasShutdownStarted)
+            return;
+        _startupFailureShown = true;
+
+        var message = $"WinClip couldn't start: {ex.GetType().Name}: {ex.Message}\n\n"
+            + $"Your clipboard history and settings are in:\n{DataDirectory}\n\n"
+            + $"Details are in {LogPath}.";
+        try
+        {
+            MessageBox.Show(message, "WinClip", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        catch (Exception showError)
+        {
+            // There is nothing left to tell the user with; the log entry above is the record.
+            LogFailure("Showing the startup error failed", showError);
+        }
+        Shutdown(1);
     }
 
     /// <summary>Applies and saves settings from the settings window. Returns an error message on failure.</summary>
@@ -113,7 +177,7 @@ public partial class App : Application
 
         if (!TryRegisterHotkey(next.Hotkey))
         {
-            TryRegisterHotkey(_settings.Hotkey);
+            EnsureHotkey();
             return $"{Describe(next.Hotkey)} is used by another app. Choose a different shortcut.";
         }
 
@@ -121,14 +185,18 @@ public partial class App : Application
         {
             next.Save(SettingsPath);
         }
-        catch (IOException ex)
+        catch (Exception ex)
         {
-            TryRegisterHotkey(_settings.Hotkey);
+            // Permissions, a full disk or a read-only profile all land here; the shortcut must go back with them.
+            EnsureHotkey();
+            LogFailure("Saving settings failed", ex);
             return $"Settings couldn't be saved: {ex.Message}";
         }
 
         _settings = next;
         _store!.MaxUnpinned = next.MaxItems;
+        if (_monitor is not null)
+            _monitor.Limits = ClipboardLimitsFor(_settings);
         return null;
     }
 
@@ -139,8 +207,17 @@ public partial class App : Application
         _hotkey = HotkeyGesture.TryParse(hotkey, out var gesture)
             ? GlobalHotkey.TryRegister(_messages!, gesture, () => TogglePopup(NativeMethods.GetForegroundWindow()))
             : null;
-        _tray!.SetHotkey(_hotkey is null ? null : Describe(hotkey));
+        _tray?.SetHotkey(_hotkey is null ? null : Describe(hotkey));
         return _hotkey is not null;
+    }
+
+    /// <summary>Registers the configured shortcut again, telling the user when it can no longer be had.</summary>
+    private void EnsureHotkey()
+    {
+        if (!TryRegisterHotkey(_settings.Hotkey))
+            _tray?.Notify("Shortcut unavailable",
+                $"{Describe(_settings.Hotkey)} can't be registered right now. Choose a different one in Settings.",
+                warning: true);
     }
 
     private void PauseHotkey(bool paused)
@@ -152,7 +229,7 @@ public partial class App : Application
         }
         else
         {
-            TryRegisterHotkey(_settings.Hotkey);
+            EnsureHotkey();
         }
     }
 
@@ -165,9 +242,13 @@ public partial class App : Application
             {
                 _settingsWindow = null;
                 if (_hotkey is null)
-                    TryRegisterHotkey(_settings.Hotkey);
+                    EnsureHotkey();
             };
             _settingsWindow.Show();
+        }
+        else if (_settingsWindow.WindowState == WindowState.Minimized)
+        {
+            _settingsWindow.WindowState = WindowState.Normal;
         }
         _settingsWindow.Activate();
         WindowFocus.BringToForeground(new System.Windows.Interop.WindowInteropHelper(_settingsWindow).Handle);
@@ -180,35 +261,116 @@ public partial class App : Application
             || (content.Kind == ClipKind.Text && content.Text.Length > _settings.MaxItemLength)
             || (content.Formats.TryGetValue(ClipFormat.Png, out var png) && png.Length > MaxImageBytes))
             return;
-        _store!.Add(content, captured.SourceApp, DateTimeOffset.Now);
+
+        if (_store is not { } store)
+            return;
+
+        // DPAPI plus a SQLite write can take a second for a large image, and this runs on the capture thread.
+        // Writes are chained so items still land in the order they were copied.
+        var now = DateTimeOffset.Now;
+        lock (_writeGate)
+        {
+            _storeWrites = _storeWrites.ContinueWith(
+                _ => AddToStore(store, content, captured.SourceApp, now), TaskScheduler.Default);
+        }
+    }
+
+    private static void AddToStore(HistoryStore store, ClipContent content, string? sourceApp, DateTimeOffset now)
+    {
+        try
+        {
+            store.Add(content, sourceApp, now);
+        }
+        catch (Exception ex)
+        {
+            LogFailure("Saving a clipboard item failed", ex);
+        }
     }
 
     private void TogglePopup(IntPtr target)
     {
-        if (_popup!.IsVisible)
-            _popup.Hide();
-        else
-            _popup.ShowFor(target);
+        if (_popup is not { } popup)
+            return;
+
+        if (popup.IsVisible)
+        {
+            popup.Hide();
+            return;
+        }
+
+        try
+        {
+            popup.ShowFor(target);
+        }
+        catch (Exception ex)
+        {
+            LogFailure("Opening the history popup failed", ex);
+            _tray?.Notify("Clipboard history",
+                "The history window couldn't be opened. Restart WinClip; details are in the log file.", warning: true);
+        }
     }
 
     private async void OnItemChosen(ClipItem item, IntPtr pasteTarget, bool plainText)
     {
+        // Two quick choices must not interleave their clipboard writes and their keystrokes.
+        await _pasteGate.WaitAsync();
         try
         {
-            var formats = _store!.GetFormats(item.Id);
-            if (!await ClipboardAccess.TryWriteAsync(_messages!.Handle, item, formats, plainText))
+            var store = _store;
+            if (store is null)
+                return;
+
+            var prepared = await Task.Run(() => PreparePaste(store, item, plainText));
+            if (prepared is not { } paste)
             {
-                _tray!.Notify("Couldn't copy", "Another app is holding the clipboard. Try again.", warning: true);
+                _tray?.Notify("Couldn't copy", "That item is no longer in your history.", warning: true);
                 return;
             }
-            _store.Touch(item.Id, DateTimeOffset.Now);
-            if (pasteTarget != IntPtr.Zero && !await WindowFocus.PasteIntoAsync(pasteTarget))
+
+            if (!await ClipboardAccess.TryWriteAsync(_messages!.Handle, paste.Item, paste.Formats, plainText))
+            {
+                _tray?.Notify("Couldn't copy", "Another app is holding the clipboard. Try again.", warning: true);
+                return;
+            }
+            await Task.Run(() => store.Touch(item.Id, DateTimeOffset.Now));
+
+            if (pasteTarget == IntPtr.Zero)
+                return;
+            var outcome = await WindowFocus.PasteIntoAsync(pasteTarget);
+            if (outcome == PasteOutcome.ModifiersHeld)
+                _tray?.Notify("Copied, not pasted",
+                    "Release Shift, Alt or the Windows key, then paste with Ctrl+V.", warning: true);
+            else if (outcome != PasteOutcome.Pasted)
                 Trace.TraceWarning("Paste target did not take focus; the item is on the clipboard.");
         }
         catch (Exception ex)
         {
-            Trace.TraceError($"Paste failed: {ex}");
+            LogFailure("Paste failed", ex);
         }
+        finally
+        {
+            _pasteGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Loads what writing <paramref name="item"/> needs. List rows may carry shortened text, so text and files
+    /// come from the store; formats are only fetched when the write will actually use them.
+    /// </summary>
+    private static PasteRequest? PreparePaste(HistoryStore store, ClipItem item, bool plainText)
+    {
+        var text = item.Text;
+        if (item.Kind is ClipKind.Text or ClipKind.Files)
+        {
+            if (store.GetFullText(item.Id) is not { } full)
+                return null;
+            text = full;
+        }
+
+        var formats = NoFormats;
+        if (item.Kind == ClipKind.Image || (item.Kind == ClipKind.Text && !plainText))
+            formats = store.GetFormats(item.Id);
+        return new PasteRequest(item with { Text = text }, formats);
     }
 
     private void ClearHistory()
@@ -217,6 +379,25 @@ public partial class App : Application
             MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel);
         if (answer == MessageBoxResult.OK)
             _store!.ClearUnpinned();
+    }
+
+    private static ClipboardLimits ClipboardLimitsFor(AppSettings settings) =>
+        new(settings.MaxItemLength, MaxImageBytes);
+
+    /// <summary>
+    /// Logs the exception type and stack only: messages can quote clipboard-derived text, and the log is a
+    /// plain-text file next to the history.
+    /// </summary>
+    private static void LogFailure(string context, Exception ex)
+    {
+        try
+        {
+            Trace.TraceError($"{context}: {ex.GetType().FullName}{Environment.NewLine}{ex.StackTrace}");
+        }
+        catch (Exception)
+        {
+            // Logging must never be what takes the app down.
+        }
     }
 
     private static string Describe(string hotkey) =>

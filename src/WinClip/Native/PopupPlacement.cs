@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using static WinClip.Native.NativeMethods;
 
@@ -35,11 +34,10 @@ internal static class PopupPlacement
     public static void Place(IntPtr hwnd, POINT anchor, double widthDips, double heightDips)
     {
         var monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
-        var info = new MONITORINFO { Size = Marshal.SizeOf<MONITORINFO>() };
-        GetMonitorInfo(monitor, ref info);
         var scale = GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 ? dpi / 96.0 : 1.0;
+        if (!TryGetWorkArea(monitor, scale, out var work))
+            return; // No trustworthy bounds: leave the window where Windows put it rather than pin it to (0,0).
 
-        var work = info.Work;
         var width = (int)Math.Ceiling(widthDips * scale);
         var height = (int)Math.Ceiling(heightDips * scale);
 
@@ -50,9 +48,31 @@ internal static class PopupPlacement
         y = Math.Clamp(y, work.Top, Math.Max(work.Top, work.Bottom - height));
 
         SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        GetWindowRect(hwnd, out var actual);
-        Trace.TraceInformation(
-            $"Popup anchor=({anchor.X},{anchor.Y}) work=({work.Left},{work.Top},{work.Right},{work.Bottom}) " +
-            $"scale={scale} wanted=({x},{y},{width}x{height}) actual=({actual.Left},{actual.Top},{actual.Right - actual.Left}x{actual.Bottom - actual.Top})");
+    }
+
+    /// <summary>
+    /// The monitor's work area in physical pixels, falling back to the primary screen when Windows reports
+    /// nothing usable for <paramref name="monitor"/> — a failed call leaves every field at zero.
+    /// </summary>
+    private static bool TryGetWorkArea(IntPtr monitor, double scale, out RECT work)
+    {
+        var info = new MONITORINFO { Size = Marshal.SizeOf<MONITORINFO>() };
+        if (monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref info) && HasArea(info.Work))
+        {
+            work = info.Work;
+            return true;
+        }
+
+        var area = System.Windows.SystemParameters.WorkArea;
+        work = new RECT
+        {
+            Left = (int)Math.Round(area.Left * scale),
+            Top = (int)Math.Round(area.Top * scale),
+            Right = (int)Math.Round(area.Right * scale),
+            Bottom = (int)Math.Round(area.Bottom * scale),
+        };
+        return HasArea(work);
+
+        static bool HasArea(RECT rect) => rect.Right > rect.Left && rect.Bottom > rect.Top;
     }
 }
