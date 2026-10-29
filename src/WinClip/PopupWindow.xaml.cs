@@ -5,18 +5,143 @@ using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using WinClip.Core;
 using WinClip.Native;
 
 namespace WinClip;
 
-internal sealed record ClipRow(
-    ClipItem Item, string Shortcut, string Preview, string Expanded, string Origin, string Age, bool Pinned,
-    ImageSource? Thumbnail, string? Glyph)
+/// <summary>
+/// One list row. Strings and the thumbnail are computed on first access, so only rows the list actually
+/// realizes pay for them.
+/// </summary>
+internal sealed partial class ClipRow
 {
+    private const string FileGlyph = "";
+
+    private readonly int _index;
+    private readonly DateTimeOffset _now;
+    private readonly Func<ClipItem, ImageSource?> _thumbnailSource;
+    private readonly Lazy<(string Preview, string Expanded)> _text;
+    private readonly Lazy<string> _origin;
+    private readonly Lazy<string> _age;
+    private readonly Lazy<string> _accessibleName;
+
+    public ClipRow(ClipItem item, int index, DateTimeOffset now, Func<ClipItem, ImageSource?> thumbnailSource)
+    {
+        Item = item;
+        _index = index;
+        _now = now;
+        _thumbnailSource = thumbnailSource;
+        _text = new Lazy<(string, string)>(BuildText);
+        _origin = new Lazy<string>(BuildOrigin);
+        _age = new Lazy<string>(() => FormatAge(_now - Item.LastCopiedAt, Item.LastCopiedAt));
+        _accessibleName = new Lazy<string>(BuildAccessibleName);
+    }
+
+    public ClipItem Item { get; }
+    public bool Pinned => Item.Pinned;
+    public string Shortcut => _index < 9 ? (_index + 1).ToString() : "";
+    public string Preview => _text.Value.Preview;
+    public string Expanded => _text.Value.Expanded;
+    public string Origin => _origin.Value;
+    public string Age => _age.Value;
+    public string AccessibleName => _accessibleName.Value;
+    public ImageSource? Thumbnail => _thumbnailSource(Item);
+    public string? Glyph => Item.Kind == ClipKind.Files ? FileGlyph : null;
     public Visibility PinVisibility => Pinned ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility ThumbnailVisibility => Thumbnail is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ThumbnailVisibility => Item.Thumbnail is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility GlyphVisibility => Glyph is null ? Visibility.Collapsed : Visibility.Visible;
+
+    private (string, string) BuildText()
+    {
+        var text = Item.Text;
+        var head = text.Length > 600 ? text[..600] : text;
+        if (Item.Kind == ClipKind.Files)
+        {
+            var paths = text.Split('\n');
+            var first = Path.GetFileName(paths[0].TrimEnd('\\'));
+            return (paths.Length == 1 ? first : $"{first} and {paths.Length - 1} more",
+                string.Join('\n', paths.Take(4)) + (paths.Length > 4 ? $"\nand {paths.Length - 4} more" : ""));
+        }
+        return (Whitespace().Replace(head.Length > 300 ? head[..300] : head, " ").Trim(),
+            head.Replace("\t", "    ").Trim('\r', '\n'));
+    }
+
+    private string BuildOrigin() => "Copied"
+        + (Item.SourceApp is { } app ? $" from {app}" : "")
+        + (Item.IsRichText ? " with formatting" : "")
+        + (Item.CopyCount > 1 ? $", {Item.CopyCount} times" : "");
+
+    private string BuildAccessibleName()
+    {
+        var preview = Preview;
+        if (preview.Length == 0 && Item.Kind == ClipKind.Image)
+            preview = "Image";
+        var parts = new List<string>(4);
+        if (Pinned)
+            parts.Add("Pinned");
+        if (Shortcut.Length > 0)
+            parts.Add(Shortcut);
+        if (preview.Length > 0)
+            parts.Add(preview);
+        parts.Add($"{Origin}, {Age}");
+        return string.Join(". ", parts);
+    }
+
+    private static string FormatAge(TimeSpan age, DateTimeOffset at) => age switch
+    {
+        { TotalMinutes: < 1 } => "now",
+        { TotalHours: < 1 } => $"{(int)age.TotalMinutes}m",
+        { TotalDays: < 1 } => $"{(int)age.TotalHours}h",
+        { TotalDays: < 7 } => $"{(int)age.TotalDays}d",
+        _ => at.ToLocalTime().ToString("MMM d"),
+    };
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex Whitespace();
+}
+
+/// <summary>Small least-recently-used cache of decoded thumbnails; failed decodes are cached as null.</summary>
+internal sealed class ThumbnailCache(int capacity)
+{
+    private readonly Dictionary<long, LinkedListNode<(long Id, ImageSource? Image)>> _map = [];
+    private readonly LinkedList<(long Id, ImageSource? Image)> _order = new();
+
+    public ImageSource? Get(ClipItem item)
+    {
+        if (item.Thumbnail is null)
+            return null;
+        if (_map.TryGetValue(item.Id, out var node))
+        {
+            _order.Remove(node);
+            _order.AddFirst(node);
+            return node.Value.Image;
+        }
+
+        ImageSource? image = null;
+        try
+        {
+            image = ImageCodec.Decode(item.Thumbnail);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or FileFormatException)
+        {
+        }
+
+        _map[item.Id] = _order.AddFirst((item.Id, image));
+        if (_map.Count > capacity)
+        {
+            _map.Remove(_order.Last!.Value.Id);
+            _order.RemoveLast();
+        }
+        return image;
+    }
+
+    public void Clear()
+    {
+        _map.Clear();
+        _order.Clear();
+    }
 }
 
 /// <summary>
@@ -25,12 +150,15 @@ internal sealed record ClipRow(
 /// </summary>
 internal sealed partial class PopupWindow : Window
 {
-    private readonly HistoryStore _store;
-    private const string FileGlyph = "";
+    private const int DebounceThreshold = 1000;
 
-    private readonly Dictionary<long, ImageSource> _thumbnails = [];
+    private readonly HistoryStore _store;
+    private readonly ThumbnailCache _thumbnails = new(120);
+    private readonly DispatcherTimer _searchTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
     private IReadOnlyList<ClipItem> _history = [];
     private IntPtr _target;
+    private ClipRow? _pressedRow;
+    private bool _suppressSearch;
 
     public PopupWindow(HistoryStore store)
     {
@@ -39,7 +167,20 @@ internal sealed partial class PopupWindow : Window
         Deactivated += (_, _) => Hide();
         PreviewKeyDown += OnKeyDown;
         SourceInitialized += (_, _) => ApplyWindowFrame();
+        IsVisibleChanged += (_, e) =>
+        {
+            if (e.NewValue is false)
+                ReleaseHistory();
+        };
+        _searchTimer.Tick += (_, _) =>
+        {
+            _searchTimer.Stop();
+            Refresh();
+        };
     }
+
+    /// <summary>True while clipboard recording is paused; shown in the empty state and footer.</summary>
+    public bool RecordingPaused { get; set; }
 
     /// <summary>
     /// Raised with the chosen item, the window to paste into (zero: copy only), and whether to drop formatting.
@@ -51,10 +192,7 @@ internal sealed partial class PopupWindow : Window
     {
         _target = target;
         _history = _store.GetAll();
-        var ids = _history.Select(item => item.Id).ToHashSet();
-        foreach (var stale in _thumbnails.Keys.Where(id => !ids.Contains(id)).ToList())
-            _thumbnails.Remove(stale);
-        SearchBox.Text = "";
+        SetSearchText("");
         Refresh();
         RenderHints();
 
@@ -69,13 +207,51 @@ internal sealed partial class PopupWindow : Window
         SearchBox.Focus();
     }
 
-    private void OnSearchChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => Refresh();
+    private void OnSearchChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        if (_suppressSearch)
+            return;
+        // Large histories get a short debounce so fast typing doesn't re-filter on every key.
+        if (_history.Count > DebounceThreshold)
+        {
+            Placeholder.Visibility = SearchBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+            _searchTimer.Stop();
+            _searchTimer.Start();
+        }
+        else
+            Refresh();
+    }
+
+    /// <summary>Sets the search text without triggering a refresh; callers refresh themselves.</summary>
+    private void SetSearchText(string text)
+    {
+        _suppressSearch = true;
+        try
+        {
+            SearchBox.Text = text;
+        }
+        finally
+        {
+            _suppressSearch = false;
+        }
+    }
+
+    /// <summary>Drops decrypted history, rows and decoded images once the popup is hidden.</summary>
+    private void ReleaseHistory()
+    {
+        _searchTimer.Stop();
+        _pressedRow = null;
+        Clips.ItemsSource = null;
+        _history = [];
+        _thumbnails.Clear();
+        SetSearchText("");
+    }
 
     private void Refresh(long? keepSelectedId = null)
     {
         var now = DateTimeOffset.Now;
         var matches = ClipSearch.Filter(_history, SearchBox.Text);
-        var rows = matches.Select((item, i) => ToRow(item, i, now)).ToList();
+        var rows = matches.Select((item, i) => new ClipRow(item, i, now, _thumbnails.Get)).ToList();
         Clips.ItemsSource = rows;
 
         var keep = rows.FindIndex(r => r.Item.Id == keepSelectedId);
@@ -84,9 +260,11 @@ internal sealed partial class PopupWindow : Window
             Clips.ScrollIntoView(Clips.SelectedItem);
 
         Placeholder.Visibility = SearchBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-        EmptyState.Text = _history.Count == 0
-            ? "Copy something and it shows up here."
-            : $"Nothing matches “{SearchBox.Text.Trim()}”.";
+        EmptyState.Text = _history.Count > 0
+            ? $"Nothing matches “{SearchBox.Text.Trim()}”."
+            : RecordingPaused
+                ? "Recording is paused. Turn it back on from the tray menu."
+                : "Copy something and it shows up here.";
         EmptyState.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -126,10 +304,21 @@ internal sealed partial class PopupWindow : Window
         }
     }
 
+    private ClipRow? RowAt(object originalSource) =>
+        originalSource is DependencyObject element
+        && Clips.ContainerFromElement(element) is FrameworkElement { DataContext: ClipRow row }
+            ? row
+            : null;
+
+    private void OnClipPressed(object sender, MouseButtonEventArgs e) => _pressedRow = RowAt(e.OriginalSource);
+
     private void OnClipClicked(object sender, MouseButtonEventArgs e)
     {
-        if (Clips.ContainerFromElement((DependencyObject)e.OriginalSource) is FrameworkElement { DataContext: ClipRow row })
-            Choose(row, paste: true, plainText: false);
+        var pressed = _pressedRow;
+        _pressedRow = null;
+        // Ignore releases from drags or scrolls that started elsewhere.
+        if (RowAt(e.OriginalSource) is { } row && row == pressed)
+            Choose(row, paste: true, plainText: Keyboard.Modifiers == ModifierKeys.Shift);
     }
 
     private void MoveSelection(int delta)
@@ -166,12 +355,20 @@ internal sealed partial class PopupWindow : Window
         _history = _store.GetAll();
         Refresh();
         if (Clips.Items.Count > 0)
+        {
             Clips.SelectedIndex = Math.Min(index, Clips.Items.Count - 1);
+            Clips.ScrollIntoView(Clips.SelectedItem);
+        }
     }
 
     private void RenderHints()
     {
         Hints.Inlines.Clear();
+        if (RecordingPaused)
+        {
+            Hints.Inlines.Add(new Run("Recording paused") { Foreground = (Brush)FindResource("Pin") });
+            Hints.Inlines.Add(new LineBreak());
+        }
         var canPaste = _target != IntPtr.Zero;
         (string Keys, string Action)[] hints = canPaste
             ? [("Enter", "paste"), ("Shift+Enter", "plain"), ("Ctrl+Enter", "copy"), ("Alt+P", "pin"), ("Alt+Del", "delete")]
@@ -192,68 +389,4 @@ internal sealed partial class PopupWindow : Window
         var border = 0x00433732; // COLORREF is 0x00BBGGRR: #323743, the Hairline brush.
         NativeMethods.DwmSetWindowAttribute(handle, NativeMethods.DWMWA_BORDER_COLOR, ref border, sizeof(int));
     }
-
-    private ClipRow ToRow(ClipItem item, int index, DateTimeOffset now)
-    {
-        var head = item.Text.Length > 600 ? item.Text[..600] : item.Text;
-        string preview, expanded;
-        if (item.Kind == ClipKind.Files)
-        {
-            var paths = item.Text.Split('\n');
-            var first = Path.GetFileName(paths[0].TrimEnd('\\'));
-            preview = paths.Length == 1 ? first : $"{first} and {paths.Length - 1} more";
-            expanded = string.Join('\n', paths.Take(4)) + (paths.Length > 4 ? $"\nand {paths.Length - 4} more" : "");
-        }
-        else
-        {
-            preview = Whitespace().Replace(head.Length > 300 ? head[..300] : head, " ").Trim();
-            expanded = head.Replace("\t", "    ").Trim('\r', '\n');
-        }
-
-        var origin = "Copied"
-            + (item.SourceApp is { } app ? $" from {app}" : "")
-            + (item.IsRichText ? " with formatting" : "")
-            + (item.CopyCount > 1 ? $", {item.CopyCount} times" : "");
-
-        return new ClipRow(
-            item,
-            Shortcut: index < 9 ? (index + 1).ToString() : "",
-            Preview: preview,
-            Expanded: expanded,
-            Origin: origin,
-            Age: FormatAge(now - item.LastCopiedAt, item.LastCopiedAt),
-            Pinned: item.Pinned,
-            Thumbnail: Thumbnail(item),
-            Glyph: item.Kind == ClipKind.Files ? FileGlyph : null);
-    }
-
-    private ImageSource? Thumbnail(ClipItem item)
-    {
-        if (item.Thumbnail is null)
-            return null;
-        if (!_thumbnails.TryGetValue(item.Id, out var image))
-        {
-            try
-            {
-                image = ImageCodec.Decode(item.Thumbnail);
-            }
-            catch (Exception ex) when (ex is NotSupportedException or FileFormatException)
-            {
-                return null;
-            }
-            _thumbnails[item.Id] = image;
-        }
-        return image;
-    }
-    private static string FormatAge(TimeSpan age, DateTimeOffset at) => age switch
-    {
-        { TotalMinutes: < 1 } => "now",
-        { TotalHours: < 1 } => $"{(int)age.TotalMinutes}m",
-        { TotalDays: < 1 } => $"{(int)age.TotalHours}h",
-        { TotalDays: < 7 } => $"{(int)age.TotalDays}d",
-        _ => at.ToLocalTime().ToString("MMM d"),
-    };
-
-    [GeneratedRegex(@"\s+")]
-    private static partial Regex Whitespace();
 }

@@ -7,7 +7,7 @@
         <SolidColorBrush x:Key="Raised" Color="#272B33" />
         <SolidColorBrush x:Key="Hairline" Color="#323743" />
         <SolidColorBrush x:Key="Text" Color="#E6E8EC" />
-        <SolidColorBrush x:Key="Muted" Color="#8A92A0" />
+        <SolidColorBrush x:Key="Muted" Color="#9AA3B2" />
         <SolidColorBrush x:Key="Accent" Color="#7B93FF" />
         <SolidColorBrush x:Key="AccentPressed" Color="#6A80E6" />
         <SolidColorBrush x:Key="OnAccent" Color="#141720" />
