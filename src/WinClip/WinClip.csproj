@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\WinClip.Core\WinClip.Core.csproj" />
@@ -14,7 +14,16 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>WinClip.ico</ApplicationIcon>
+    <!-- Release builds override this from the git tag (see .github/workflows/release.yml). -->
+    <Version>0.0.0-dev</Version>
+    <!-- Velopack must run before WPF starts, so the entry point is Program.Main rather than the generated one. -->
+    <StartupObject>WinClip.Program</StartupObject>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Include="App.xaml" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- Regenerate with scripts/make-icon.ps1. Embedded again for the tray, which needs it at runtime. -->
@@ -25,6 +34,10 @@
     <!-- Keep WinForms/Drawing out of global usings so WPF types (Application, Clipboard, Point...) stay unambiguous. -->
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
 
 </Project>

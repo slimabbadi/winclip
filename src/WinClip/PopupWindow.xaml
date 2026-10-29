@@ -35,6 +35,8 @@
                  Background="Transparent" BorderThickness="0"
                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                  ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                 VirtualizingPanel.ScrollUnit="Pixel"
+                 VirtualizingPanel.VirtualizationMode="Recycling"
                  PreviewMouseLeftButtonDown="OnClipPressed"
                  PreviewMouseLeftButtonUp="OnClipClicked"
                  AutomationProperties.Name="Clipboard history">

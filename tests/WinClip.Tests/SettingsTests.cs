@@ -44,10 +44,22 @@ public sealed class SettingsTests
     }
 
     [Fact]
+    public void Existing_settings_without_update_preference_enable_checks()
+    {
+        var path = Path.Combine(Directory.CreateTempSubdirectory("winclip-tests-").FullName, "settings.json");
+        File.WriteAllText(path, """{ "MaxItems": 42 }""");
+
+        var loaded = AppSettings.LoadOrCreate(path);
+
+        Assert.True(loaded.CheckForUpdates);
+        Assert.Equal(42, loaded.MaxItems);
+    }
+
+    [Fact]
     public void Saved_settings_round_trip()
     {
         var path = Path.Combine(Directory.CreateTempSubdirectory("winclip-tests-").FullName, "settings.json");
-        var settings = new AppSettings { Hotkey = "Ctrl+Shift+Space", MaxItems = 42, IgnoredApps = ["Secret.exe"] };
+        var settings = new AppSettings { Hotkey = "Ctrl+Shift+Space", MaxItems = 42, IgnoredApps = ["Secret.exe"], CheckForUpdates = false };
 
         settings.Save(path);
         var loaded = AppSettings.LoadOrCreate(path);
@@ -55,6 +67,7 @@ public sealed class SettingsTests
         Assert.Equal(settings.Hotkey, loaded.Hotkey);
         Assert.Equal(42, loaded.MaxItems);
         Assert.Equal(["Secret.exe"], loaded.IgnoredApps);
+        Assert.False(loaded.CheckForUpdates);
     }
 
     [Theory]

@@ -40,6 +40,9 @@ public partial class App : Application
     private PopupWindow? _popup;
     private SettingsWindow? _settingsWindow;
     private TrayIcon? _tray;
+    private Updater? _updater;
+    private DispatcherTimer? _updateTimer;
+    private bool _checkingForUpdates;
     private Task _storeWrites = Task.CompletedTask;
     private bool _startupCompleted;
     private bool _startupFailureShown;
@@ -63,6 +66,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _updateTimer?.Stop();
         // Queued history writes are short; letting them finish keeps the last copy the user made.
         try
         {
@@ -112,6 +116,13 @@ public partial class App : Application
             settingsError = $"Your settings file is invalid, so defaults are in use. {ex.Message}";
         }
 
+        _updater = new Updater();
+        if (_updater.ReadyVersion is not null && _updater.ScheduleRestart())
+        {
+            Shutdown();
+            return;
+        }
+
         _store = new HistoryStore(Path.Combine(DataDirectory, "history.db"), _settings.MaxItems, new DpapiProtector());
         _messages = new MessageWindow();
         _monitor = new ClipboardMonitor(_messages, ClipboardLimitsFor(_settings));
@@ -127,7 +138,19 @@ public partial class App : Application
             },
             openSettings: OpenSettings,
             clearHistory: ClearHistory,
+            checkForUpdates: () => _ = CheckForUpdatesAsync(true),
+            restartToUpdate: RestartToUpdate,
             quit: Shutdown);
+
+        _updateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+        _updateTimer.Tick += (_, _) =>
+        {
+            _updateTimer.Interval = TimeSpan.FromDays(1);
+            if (_settings.CheckForUpdates)
+                _ = CheckForUpdatesAsync(false);
+        };
+        if (_settings.CheckForUpdates)
+            _updateTimer.Start();
 
         var hotkeyRegistered = TryRegisterHotkey(_settings.Hotkey);
         if (settingsError is not null)
@@ -199,10 +222,58 @@ public partial class App : Application
         }
 
         _settings = next;
+        if (next.CheckForUpdates)
+            _updateTimer?.Start();
+        else
+            _updateTimer?.Stop();
         _store!.MaxUnpinned = next.MaxItems;
         if (_monitor is not null)
             _monitor.Limits = ClipboardLimitsFor(_settings);
         return null;
+    }
+
+    private async Task CheckForUpdatesAsync(bool userRequested)
+    {
+        if (_checkingForUpdates || _updater is null)
+            return;
+        _checkingForUpdates = true;
+        try
+        {
+            var outcome = await _updater.CheckAndDownloadAsync();
+            if (Dispatcher.HasShutdownStarted)
+                return;
+            if (outcome == UpdateCheckResult.Ready)
+                _tray!.ShowUpdateReady(_updater.ReadyVersion!, RestartToUpdate);
+            else if (userRequested)
+                _tray!.Notify("WinClip updates", outcome == UpdateCheckResult.NotSupported
+                    ? "Install WinClip using Setup.exe or the portable zip from GitHub Releases to receive updates."
+                    : $"WinClip {_updater.CurrentVersion} is up to date.");
+        }
+        catch (Exception ex)
+        {
+            // This is the background task boundary: an update failure must not stop clipboard capture.
+            LogFailure("Checking for updates failed", ex);
+            if (userRequested && !Dispatcher.HasShutdownStarted)
+                _tray?.Notify("Update check failed", "Couldn't check or download updates. Try again later; details are in the log.", warning: true);
+        }
+        finally
+        {
+            _checkingForUpdates = false;
+        }
+    }
+
+    private void RestartToUpdate()
+    {
+        try
+        {
+            if (_updater?.ScheduleRestart() == true)
+                Shutdown();
+        }
+        catch (Exception ex)
+        {
+            LogFailure("Scheduling an update failed", ex);
+            _tray?.Notify("Couldn't restart to update", "Quit and start WinClip again to retry the downloaded update.", warning: true);
+        }
     }
 
     /// <summary>Replaces the global shortcut. On failure no shortcut is registered.</summary>

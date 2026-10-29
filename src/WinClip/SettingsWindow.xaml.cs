@@ -24,6 +24,7 @@ internal sealed partial class SettingsWindow : Window
         MaxItemLength.Text = current.MaxItemLength.ToString();
         IgnoredApps.Text = string.Join(Environment.NewLine, current.IgnoredApps);
         StartWithWindows.IsChecked = StartupRegistration.IsEnabled;
+        CheckForUpdates.IsChecked = current.CheckForUpdates;
     }
 
     private void OnSave(object sender, RoutedEventArgs e)
@@ -43,6 +44,7 @@ internal sealed partial class SettingsWindow : Window
                 .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
+            CheckForUpdates = CheckForUpdates.IsChecked == true,
         };
 
         if (_apply(settings) is { } error)

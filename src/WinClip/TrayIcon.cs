@@ -10,11 +10,16 @@ internal sealed class TrayIcon : IDisposable
     private readonly Icon _image;
     private readonly Bitmap _coffee = DrawCoffeeCup();
     private readonly ToolStripMenuItem _showHistory;
+    private readonly ToolStripMenuItem _restartToUpdate;
+    private Action? _balloonClicked;
     private string? _hotkey;
     private bool _paused;
 
     /// <param name="setPaused">Called when the user turns "Pause recording" on or off.</param>
-    public TrayIcon(Action showHistory, Action<bool> setPaused, Action openSettings, Action clearHistory, Action quit)
+    /// <param name="checkForUpdates">Called for "Check for updates…".</param>
+    /// <param name="restartToUpdate">Called for "Restart to update", which appears once an update is downloaded.</param>
+    public TrayIcon(Action showHistory, Action<bool> setPaused, Action openSettings, Action clearHistory,
+        Action checkForUpdates, Action restartToUpdate, Action quit)
     {
         using (var stream = typeof(TrayIcon).Assembly.GetManifestResourceStream("WinClip.ico")!)
             _image = new Icon(stream, SystemInformation.SmallIconSize);
@@ -28,11 +33,19 @@ internal sealed class TrayIcon : IDisposable
             UpdateTooltip();
         };
 
+        _restartToUpdate = new ToolStripMenuItem("Restart to update", null, (_, _) => restartToUpdate())
+        {
+            Visible = false,
+            Font = new Font(SystemFonts.MenuFont ?? SystemFonts.DefaultFont, FontStyle.Bold),
+        };
+
         var menu = new ContextMenuStrip();
+        menu.Items.Add(_restartToUpdate);
         menu.Items.Add(_showHistory);
         menu.Items.Add(pause);
         menu.Items.Add("Settings…", null, (_, _) => openSettings());
         menu.Items.Add("Clear history…", null, (_, _) => clearHistory());
+        menu.Items.Add("Check for updates…", null, (_, _) => checkForUpdates());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Buy me a coffee…", _coffee, (_, _) => SupportLink.Open());
         menu.Items.Add("Quit WinClip", null, (_, _) => quit());
@@ -43,6 +56,16 @@ internal sealed class TrayIcon : IDisposable
             if (e.Button == MouseButtons.Left)
                 showHistory();
         };
+        _icon.BalloonTipClicked += (_, _) => _balloonClicked?.Invoke();
+    }
+
+    /// <summary>Shows "Restart to update" in the menu and a notification that installs the update when clicked.</summary>
+    public void ShowUpdateReady(string version, Action restart)
+    {
+        _restartToUpdate.Text = $"Restart to update to {version}";
+        _restartToUpdate.Visible = true;
+        Notify("Update ready", $"WinClip {version} is downloaded. Click here to restart now, or it installs next time WinClip starts.");
+        _balloonClicked = restart;
     }
 
     /// <param name="hotkey">Readable shortcut, or null when none is registered.</param>
@@ -56,8 +79,11 @@ internal sealed class TrayIcon : IDisposable
     private void UpdateTooltip() =>
         _icon.Text = "WinClip" + (_paused ? ", paused" : "") + (_hotkey is null ? "" : $" ({_hotkey})");
 
-    public void Notify(string title, string message, bool warning = false) =>
+    public void Notify(string title, string message, bool warning = false)
+    {
+        _balloonClicked = null;
         _icon.ShowBalloonTip(5000, title, message, warning ? ToolTipIcon.Warning : ToolTipIcon.Info);
+    }
 
     public void Dispose()
     {

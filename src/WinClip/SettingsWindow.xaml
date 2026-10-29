@@ -52,6 +52,10 @@
 
         <CheckBox x:Name="StartWithWindows" Content="Start with Windows" Style="{StaticResource Toggle}" Margin="0,26,0,0" />
 
+        <CheckBox x:Name="CheckForUpdates" Content="Check for updates automatically" Style="{StaticResource Toggle}" Margin="0,16,0,0" />
+        <TextBlock Style="{StaticResource Help}" Margin="46,4,0,0"
+                     Text="Checks GitHub once a day and installs new versions when you restart. Your clipboard history stays on this PC." />
+
         <TextBlock x:Name="ErrorText" Foreground="{StaticResource Error}" FontSize="13" TextWrapping="Wrap"
                    Margin="0,20,0,0" Visibility="Collapsed" />
 

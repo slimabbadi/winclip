@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to package without publishing (for example 0.2.0-alpha.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Validate version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          $version = if ($env:GITHUB_EVENT_NAME -eq 'push') { $env:GITHUB_REF_NAME.Substring(1) } else { $env:REQUESTED_VERSION }
+          if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$') { throw 'Invalid release version' }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Build
+        run: |
+          dotnet build WinClip.slnx -c Release
+          $code = $LASTEXITCODE
+          exit $code
+      - name: Test
+        run: |
+          dotnet test WinClip.slnx -c Release --no-build
+          $code = $LASTEXITCODE
+          exit $code
+      - name: Package
+        run: ./scripts/release.ps1 -Version $env:RELEASE_VERSION
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: WinClip-${{ env.RELEASE_VERSION }}
+          path: artifacts/release-${{ env.RELEASE_VERSION }}/packages/*
+          if-no-files-found: error
+      - name: Publish GitHub release
+        if: github.event_name == 'push'
+        env:
+          VPK_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $packages = "artifacts/release-$env:RELEASE_VERSION/packages"
+          $arguments = @('upload', 'github', '--repoUrl', "https://github.com/$env:GITHUB_REPOSITORY", '--outputDir', $packages,
+            '--tag', $env:GITHUB_REF_NAME, '--releaseName', "WinClip $env:RELEASE_VERSION", '--targetCommitish', $env:GITHUB_SHA, '--timeout', '5')
+          if ($env:RELEASE_VERSION.Contains('-')) { $arguments += '--pre' }
+          dotnet tool run vpk -- @arguments
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+          gh release upload $env:GITHUB_REF_NAME "$packages/SHA256SUMS.txt"
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+          gh release edit $env:GITHUB_REF_NAME --draft=false
+          $code = $LASTEXITCODE
+          exit $code

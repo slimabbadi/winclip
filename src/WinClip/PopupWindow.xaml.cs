@@ -159,11 +159,13 @@ internal sealed partial class PopupWindow : Window
     private IntPtr _target;
     private ClipRow? _pressedRow;
     private bool _suppressSearch;
+    private readonly SmoothScroll _scroll;
 
     public PopupWindow(HistoryStore store)
     {
         _store = store;
         InitializeComponent();
+        _scroll = new SmoothScroll(Clips);
         Deactivated += (_, _) => Hide();
         PreviewKeyDown += OnKeyDown;
         SourceInitialized += (_, _) => ApplyWindowFrame();
@@ -209,6 +211,7 @@ internal sealed partial class PopupWindow : Window
 
     private void OnSearchChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
+        _scroll?.Stop();
         if (_suppressSearch)
             return;
         // Large histories get a short debounce so fast typing doesn't re-filter on every key.
@@ -270,6 +273,7 @@ internal sealed partial class PopupWindow : Window
 
     private void OnKeyDown(object sender, KeyEventArgs e)
     {
+        _scroll.Stop();
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         var modifiers = Keyboard.Modifiers;
         e.Handled = true;

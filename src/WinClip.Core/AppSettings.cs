@@ -12,6 +12,9 @@ public sealed record AppSettings
     /// <summary>Copies longer than this many characters are not recorded.</summary>
     public int MaxItemLength { get; init; } = 1_000_000;
 
+    /// <summary>Whether to check GitHub Releases for a newer version about once a day.</summary>
+    public bool CheckForUpdates { get; init; } = true;
+
     /// <summary>Process names (with or without ".exe") whose copies are never recorded.</summary>
     public string[] IgnoredApps { get; init; } = ["KeePass", "KeePassXC", "1Password", "Bitwarden", "Dashlane"];
 
