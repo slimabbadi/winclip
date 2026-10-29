@@ -11,6 +11,7 @@ namespace WinClip.Core;
 /// <remarks>
 /// Text, thumbnails and formats are encrypted with the supplied <see cref="IDataProtector"/>. Duplicate
 /// detection uses a keyed hash (HMAC) so the database does not reveal which items equal a guessed value.
+/// All public members are thread-safe: calls are serialized on one lock around the single connection.
 /// </remarks>
 public sealed class HistoryStore : IDisposable
 {
@@ -21,6 +22,7 @@ public sealed class HistoryStore : IDisposable
     private readonly SqliteConnection _connection;
     private readonly IDataProtector _protector;
     private readonly byte[] _hashKey;
+    private readonly Lock _gate = new();
     private int _maxUnpinned;
 
     public HistoryStore(string databasePath, int maxUnpinned, IDataProtector protector)
@@ -57,25 +59,48 @@ public sealed class HistoryStore : IDisposable
         set
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
-            _maxUnpinned = value;
-            TrimUnpinned();
+            lock (_gate)
+            {
+                _maxUnpinned = value;
+                TrimUnpinned();
+            }
         }
     }
 
     /// <summary>Records a copy. A null <paramref name="sourceApp"/> keeps the source recorded earlier.</summary>
     public ClipItem Add(ClipContent content, string? sourceApp, DateTimeOffset now)
     {
-        ClipItem item = null!;
-        InTransaction(() =>
+        lock (_gate)
         {
-            item = Upsert(_hashKey, content, sourceApp, now);
-            TrimUnpinned();
-        });
-        return item;
+            ClipItem item = null!;
+            InTransaction(() =>
+            {
+                item = Upsert(_hashKey, content, sourceApp, now);
+                TrimUnpinned();
+            });
+            return item;
+        }
     }
 
     /// <summary>Pinned items first, then most recently copied.</summary>
+    /// <remarks><see cref="ClipItem.Text"/> may be shortened; use <see cref="GetFullText"/> for the complete text.</remarks>
     public IReadOnlyList<ClipItem> GetAll()
+    {
+        lock (_gate)
+            return ReadAll();
+    }
+
+    /// <summary>The complete text of an item, or null when the item no longer exists.</summary>
+    public string? GetFullText(long id)
+    {
+        lock (_gate)
+        {
+            using var command = Command("SELECT text FROM items WHERE id = $id;", ("$id", id));
+            return command.ExecuteScalar() is byte[] text ? Encoding.UTF8.GetString(_protector.Unprotect(text)) : null;
+        }
+    }
+
+    private List<ClipItem> ReadAll()
     {
         using var command = Command($"SELECT {Columns} FROM items ORDER BY pinned DESC, last_copied_at DESC, id DESC;");
         using var reader = command.ExecuteReader();
@@ -88,31 +113,54 @@ public sealed class HistoryStore : IDisposable
     /// <summary>The extra formats stored for an item, keyed by <see cref="ClipFormat"/> names.</summary>
     public IReadOnlyDictionary<string, byte[]> GetFormats(long id)
     {
-        using var command = Command("SELECT name, data FROM formats WHERE item_id = $id;", ("$id", id));
-        using var reader = command.ExecuteReader();
-        var formats = new Dictionary<string, byte[]>();
-        while (reader.Read())
-            formats[reader.GetString(0)] = _protector.Unprotect(reader.GetFieldValue<byte[]>(1));
-        return formats;
+        lock (_gate)
+        {
+            using var command = Command("SELECT name, data FROM formats WHERE item_id = $id;", ("$id", id));
+            using var reader = command.ExecuteReader();
+            var formats = new Dictionary<string, byte[]>();
+            while (reader.Read())
+                formats[reader.GetString(0)] = _protector.Unprotect(reader.GetFieldValue<byte[]>(1));
+            return formats;
+        }
     }
 
     /// <summary>Moves an item to the top, as when it is pasted from history.</summary>
-    public void Touch(long id, DateTimeOffset now) => Execute(
-        "UPDATE items SET last_copied_at = $now, copy_count = copy_count + 1 WHERE id = $id;",
-        ("$now", now.ToUnixTimeMilliseconds()), ("$id", id));
+    public void Touch(long id, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            Execute("UPDATE items SET last_copied_at = $now, copy_count = copy_count + 1 WHERE id = $id;",
+                ("$now", now.ToUnixTimeMilliseconds()), ("$id", id));
+        }
+    }
 
     public void SetPinned(long id, bool pinned)
     {
-        Execute("UPDATE items SET pinned = $pinned WHERE id = $id;", ("$pinned", pinned ? 1 : 0), ("$id", id));
-        if (!pinned)
-            TrimUnpinned();
+        lock (_gate)
+        {
+            Execute("UPDATE items SET pinned = $pinned WHERE id = $id;", ("$pinned", pinned ? 1 : 0), ("$id", id));
+            if (!pinned)
+                TrimUnpinned();
+        }
     }
 
-    public void Delete(long id) => Execute("DELETE FROM items WHERE id = $id;", ("$id", id));
+    public void Delete(long id)
+    {
+        lock (_gate)
+            Execute("DELETE FROM items WHERE id = $id;", ("$id", id));
+    }
 
-    public void ClearUnpinned() => Execute("DELETE FROM items WHERE pinned = 0;");
+    public void ClearUnpinned()
+    {
+        lock (_gate)
+            Execute("DELETE FROM items WHERE pinned = 0;");
+    }
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        lock (_gate)
+            _connection.Dispose();
+    }
 
     private ClipItem Upsert(byte[] hashKey, ClipContent content, string? sourceApp, DateTimeOffset now)
     {
