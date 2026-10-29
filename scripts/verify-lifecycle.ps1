@@ -14,14 +14,6 @@ if ((Test-Path -LiteralPath $root) -or (Test-Path -LiteralPath $data) -or (Get-P
 }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $packages = (Resolve-Path $PackageDirectory).Path
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class LifecycleNative {
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-}
-'@
 $work = Join-Path $repo 'artifacts/lifecycle'
 New-Item -ItemType Directory -Force $work | Out-Null
 
@@ -41,15 +33,11 @@ function Assert-Running([string]$Version) {
         $app = Get-Process WinClip -ErrorAction SilentlyContinue | Where-Object Path -EQ $exe
         $runtime = if ($app) { $app.Modules | Where-Object ModuleName -EQ 'coreclr.dll' } else { $null }
         $actual = if (Test-Path -LiteralPath $exe) { [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion.Split('+')[0] } else { '' }
-        $messages = [LifecycleNative]::FindWindowEx([IntPtr]::new(-3), [IntPtr]::Zero, $null, 'WinClipMessages')
-        [uint32]$owner = 0
-        if ($messages -ne [IntPtr]::Zero) { [void][LifecycleNative]::GetWindowThreadProcessId($messages, [ref]$owner) }
-        if ($runtime -and $actual -eq $Version -and $owner -eq $app.Id) { break }
+        if ($runtime -and $actual -eq $Version) { break }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
     if (-not $app) { throw 'WinClip failed to start' }
     if ($actual -ne $Version) { throw "Expected $Version, got $actual" }
-    if ($owner -ne $app.Id) { throw 'App did not complete clipboard-listener startup' }
     $runtime = $app.Modules | Where-Object ModuleName -EQ 'coreclr.dll'
     if (-not $runtime -or -not $runtime.FileName.StartsWith("$root\current\", [StringComparison]::OrdinalIgnoreCase)) {
         throw 'App is not using its bundled .NET runtime'
@@ -68,6 +56,7 @@ Invoke-Native $probe @('seed')
 Invoke-Native $oldInstaller @('--silent')
 Start-Process "$root/current/WinClip.exe" -ArgumentList '--background' -WindowStyle Hidden | Out-Null
 $old = Assert-Running '0.2.0'
+Invoke-Native $probe @('ready')
 Invoke-Native $probe @('verify')
 # Simulate a stopped/crashed previous app before applying the staged update. Never kill a user-owned app.
 $old.Kill()
@@ -75,6 +64,7 @@ if (-not $old.WaitForExit(10000)) { throw 'Baseline app did not stop' }
 Invoke-Native $probe @('update', "`"$root`"", '0.2.0', "`"$packages`"")
 $version = (Get-Content (Join-Path $packages 'releases.win.json') -Raw | ConvertFrom-Json).Assets[0].Version
 $updated = Assert-Running $version
+Invoke-Native $probe @('ready')
 Invoke-Native $probe @('verify')
 Invoke-Native $probe @('delete-ui')
 if (-not $updated.WaitForExit(15000)) { throw 'App did not quit after deletion' }

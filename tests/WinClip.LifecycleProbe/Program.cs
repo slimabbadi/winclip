@@ -4,9 +4,12 @@ using Velopack.Locators;
 using WinClip;
 using WinClip.Core;
 using System.Windows.Automation;
+using System.Runtime.InteropServices;
 
 internal static class Program
 {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindow(string? className, string windowName);
     private static readonly string DataDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinClip");
 
@@ -34,6 +37,9 @@ internal static class Program
                     break;
                 case "delete-ui":
                     await DeleteUi();
+                    break;
+                case "ready":
+                    await OpenSettings();
                     break;
                 default:
                     throw new ArgumentException("Unknown lifecycle command");
@@ -116,9 +122,7 @@ internal static class Program
 
     private static async Task DeleteUi()
     {
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinClip.App");
-        using var second = System.Diagnostics.Process.Start(Path.Combine(root, "current", "WinClip.exe"))!;
-        var settings = await FindElement(AutomationElement.RootElement, AutomationElement.NameProperty, "WinClip settings");
+        var settings = await OpenSettings();
         var delete = await FindElement(settings, AutomationElement.AutomationIdProperty, "DeleteData");
         var invoke = (InvokePattern)delete.GetCurrentPattern(InvokePattern.Pattern);
         var click = Task.Run(invoke.Invoke);
@@ -133,6 +137,26 @@ internal static class Program
         var confirm = await FindElement(dialog, AutomationElement.AutomationIdProperty, "1");
         ((InvokePattern)confirm.GetCurrentPattern(InvokePattern.Pattern)).Invoke();
         await click.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    private static async Task<AutomationElement> OpenSettings()
+    {
+        var until = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < until)
+        {
+            if (EventWaitHandle.TryOpenExisting(@"Local\WinClip.OpenSettings", out var signal))
+            {
+                using (signal) signal.Set();
+            }
+            var handle = FindWindow(null, "WinClip settings");
+            if (handle != IntPtr.Zero)
+            {
+                Console.WriteLine("PASS: running app responds to its Settings signal");
+                return AutomationElement.FromHandle(handle);
+            }
+            await Task.Delay(200);
+        }
+        return await FindElement(AutomationElement.RootElement, AutomationElement.NameProperty, "WinClip settings");
     }
 
     private static async Task Update(string root, string version, string feed)
