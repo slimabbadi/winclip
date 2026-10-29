@@ -483,3 +483,6 @@ $RECYCLE.BIN/
 
 # Published app (scripts/publish.ps1)
 dist/
+
+# Agent worktrees
+.claude/

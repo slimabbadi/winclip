@@ -73,4 +73,17 @@ public sealed class SettingsTests
 
         Assert.Throws<JsonException>(() => AppSettings.LoadOrCreate(path));
     }
+
+    [Fact]
+    public void Save_overwrites_atomically_and_leaves_no_temporary_files()
+    {
+        var directory = Directory.CreateTempSubdirectory("winclip-tests-").FullName;
+        var path = Path.Combine(directory, "settings.json");
+        new AppSettings { MaxItems = 10 }.Save(path);
+
+        new AppSettings { MaxItems = 20 }.Save(path);
+
+        Assert.Equal(20, AppSettings.LoadOrCreate(path).MaxItems);
+        Assert.Equal([path], Directory.GetFiles(directory));
+    }
 }
